@@ -17,6 +17,8 @@ SYMPHONY_WORKFLOW=/Users/jeff/project/github-symphony/WORKFLOW.example.md npm ru
 
 Electron 会把 `../backend/src` 注入 `PYTHONPATH`，因此开发模式不要求先把后端安装成全局包。打包模式应使用 PyInstaller 生成后端 sidecar，再由 Electron main process 启动 sidecar。
 
+Electron main 会为后端子进程补全 GUI 启动时常缺失的命令路径，包括 Homebrew、系统目录和 `~/.nvm/versions/node/*/bin`。这保证打包 `.app` 从 Finder 打开时，后端后续启动 `codex app-server` 仍然能找到 `codex` 与 `node`。
+
 开发模式和打包模式都会优先读取 Electron `userData/settings.json` 作为运行配置。GitHub token 通过 Electron `safeStorage` 加密后保存到 `userData/secrets.json`，renderer 无法读取明文 token。
 
 Settings 的 GitHub Project 页是 PAT 驱动的配置向导：用户先粘贴 PAT 或选择已保存 token，Electron main 把 token 仅用于本次本地 discovery 请求；只有点击 Save 或 Save & Apply 时才会把新 token 加密保存。

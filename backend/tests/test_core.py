@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from typing import Dict, List
 
+from symphony_github.codex.app_server import build_codex_path
 from symphony_github.core.config import build_config
 from symphony_github.core.events import EventStore
 from symphony_github.core.models import RunRecord, WorkItem
@@ -260,6 +261,20 @@ Prompt body
 
         self.assertFalse(result.success)
         self.assertIn("read_write", result.content_items[0]["text"])
+
+
+class CodexAppServerClientTest(unittest.TestCase):
+    """验证 Codex app-server 客户端的环境辅助逻辑。"""
+
+    # 函数说明：测试 PATH 构造会保留系统路径，并过滤重复路径。
+    def test_build_codex_path_keeps_existing_system_path_without_duplicates(self) -> None:
+        existing = "/usr/bin:/bin:/usr/bin"
+        merged = build_codex_path(existing)
+        parts = merged.split(":")
+
+        self.assertIn("/usr/bin", parts)
+        self.assertIn("/bin", parts)
+        self.assertEqual(parts.count("/usr/bin"), 1)
 
 
 class FakeProjectClient(GitHubClient):

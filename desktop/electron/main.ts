@@ -133,6 +133,59 @@ function defaultSettings(): Record<string, unknown> {
   };
 }
 
+// 函数说明：为 GUI 启动的打包 App 补全常见命令行工具 PATH。
+function buildAugmentedPath(existingPath: string | undefined): string {
+  const entries = commonCommandPathEntries();
+  if (existingPath) {
+    entries.push(...existingPath.split(path.delimiter).filter(Boolean));
+  }
+  return dedupeExistingPathEntries(entries).join(path.delimiter);
+}
+
+// 函数说明：返回 macOS GUI 环境中经常缺失的 Node、Codex、Homebrew 路径。
+function commonCommandPathEntries(): string[] {
+  const home = app.getPath("home");
+  const entries = [
+    path.join(home, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  const nvmNodeRoot = path.join(home, ".nvm", "versions", "node");
+
+  // 逻辑说明：Codex CLI 由 npm/nvm 安装时，GUI App 不会自动继承 shell rc PATH。
+  // 这里发现所有 nvm Node 版本，并把较新的版本排在前面，保证 `env node` 能找到 node。
+  if (fs.existsSync(nvmNodeRoot)) {
+    const nvmBins = fs
+      .readdirSync(nvmNodeRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(nvmNodeRoot, entry.name, "bin"))
+      .sort()
+      .reverse();
+    entries.unshift(...nvmBins);
+  }
+
+  return entries;
+}
+
+// 函数说明：去重并过滤不存在的 PATH 目录，避免把无效路径传给后端子进程。
+function dedupeExistingPathEntries(entries: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of entries) {
+    const normalized = path.resolve(entry);
+    if (seen.has(normalized) || !fs.existsSync(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
 // 函数说明：从随包 WORKFLOW.example.md 中读取 prompt body；失败时使用内置提示。
 function readBundledPromptTemplate(): string {
   const projectRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
@@ -431,6 +484,7 @@ function startBackend(): void {
   const env = {
     ...process.env,
     PYTHONPATH: [backendSource, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+    PATH: buildAugmentedPath(process.env.PATH),
   };
 
   backendProcess = spawn(

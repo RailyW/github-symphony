@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 from asyncio.subprocess import PIPE, Process
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from symphony_github.core.config import CodexConfig
 from symphony_github.core.events import EventStore
-
 
 DynamicToolExecutor = Callable[[str, Any], Awaitable[Dict[str, Any]]]
 
@@ -73,6 +73,7 @@ class CodexAppServerClient:
             stdin=PIPE,
             stdout=PIPE,
             stderr=PIPE,
+            env=codex_subprocess_env(),
         )
         self._reader_task = asyncio.create_task(self._read_stdout_loop())
         self._stderr_task = asyncio.create_task(self._read_stderr_loop())
@@ -192,6 +193,12 @@ class CodexAppServerClient:
 
             await self._handle_message(message)
 
+        # 逻辑说明：如果 app-server 进程在响应 initialize/thread/turn 前退出，
+        # stdout 会先关闭。这里主动失败所有等待中的 request，避免 runner 永远卡住。
+        self._fail_pending(
+            AppServerError("Codex app-server stdout 已关闭，可能是命令或运行环境无效")
+        )
+
     # 函数说明：持续读取 stderr，并写入事件流用于诊断。
     async def _read_stderr_loop(self) -> None:
         if self.process is None or self.process.stderr is None:
@@ -207,7 +214,11 @@ class CodexAppServerClient:
 
     # 函数说明：根据 JSON-RPC 消息类型分派 response、notification 和 server request。
     async def _handle_message(self, message: Dict[str, Any]) -> None:
-        if "id" in message and ("result" in message or "error" in message) and "method" not in message:
+        if (
+            "id" in message
+            and ("result" in message or "error" in message)
+            and "method" not in message
+        ):
             self._resolve_response(message)
             return
 
@@ -232,6 +243,18 @@ class CodexAppServerClient:
             future.set_exception(AppServerError(json.dumps(message["error"], ensure_ascii=False)))
         else:
             future.set_result(message.get("result") or {})
+
+    # 函数说明：让所有等待中的 JSON-RPC request/turn 以同一个错误结束。
+    def _fail_pending(self, error: Exception) -> None:
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
+
+        # 逻辑说明：run_turn 可能已经拿到 turn/start 响应、正在等待 turn/completed；
+        # 进程退出时同样要解除等待，让调度器能够进入重试/报错路径。
+        if self._turn_completed is not None and not self._turn_completed.done():
+            self._turn_completed.set_exception(error)
 
     # 函数说明：处理 app-server 请求的动态工具调用。
     async def _handle_dynamic_tool_call(self, message: Dict[str, Any]) -> None:
@@ -316,6 +339,58 @@ def _compact_params(params: Dict[str, Any]) -> Dict[str, Any]:
 # 函数说明：把命令字符串切分成 argv，仅供未来非 shell 启动策略复用。
 def split_command(command: str) -> list:
     return shlex.split(command)
+
+
+# 函数说明：为 Codex 子进程构造环境变量，补上 GUI App 常缺失的 Node/Codex 路径。
+def codex_subprocess_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    env["PATH"] = build_codex_path(env.get("PATH", ""))
+    return env
+
+
+# 函数说明：合并现有 PATH 和常见开发工具路径，供测试和 Electron 打包环境复用。
+def build_codex_path(existing_path: str) -> str:
+    entries = _candidate_path_entries()
+    entries.extend([entry for entry in existing_path.split(os.pathsep) if entry])
+    return os.pathsep.join(_dedupe_existing_path_entries(entries))
+
+
+# 函数说明：返回 macOS GUI 环境中常见但未必继承到的命令目录。
+def _candidate_path_entries() -> list[str]:
+    home = Path.home()
+    entries = [
+        str(home / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+
+    # 逻辑说明：通过 nvm 安装的 codex/npm/node 常位于 ~/.nvm/versions/node/<version>/bin。
+    # GUI 启动的 Electron 通常不会加载 shell rc 文件，因此这里主动发现所有版本。
+    nvm_node_root = home / ".nvm" / "versions" / "node"
+    if nvm_node_root.exists():
+        entries = [
+            str(path / "bin")
+            for path in sorted(nvm_node_root.iterdir(), reverse=True)
+            if path.is_dir()
+        ] + entries
+    return entries
+
+
+# 函数说明：去重并保留存在的 PATH 目录，避免传入过长或无效的环境变量。
+def _dedupe_existing_path_entries(entries: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for entry in entries:
+        normalized = str(Path(entry).expanduser())
+        if normalized in seen or not Path(normalized).exists():
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 APPROVAL_OR_INPUT_REQUESTS = {
