@@ -23,11 +23,10 @@ GitHub Symphony 是一个面向 GitHub Projects v2 的本地 Codex 编排器。�
 
 ```bash
 cd /Users/jeff/project/github-symphony/backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-symphony-github doctor
-symphony-github run ../WORKFLOW.example.md --host 127.0.0.1 --port 8765
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -e ".[dev,package]"
+./.venv/bin/symphony-github doctor
+./.venv/bin/symphony-github run ../WORKFLOW.example.md --host 127.0.0.1 --port 8765
 ```
 
 桌面端：
@@ -39,6 +38,30 @@ npm run dev
 ```
 
 注意：安装依赖会从第三方包仓库下载软件包，执行前请自行确认网络与供应链策略。
+
+## 桌面成品包
+
+macOS 当前可通过 PyInstaller sidecar + electron-builder 生成 DMG：
+
+```bash
+cd /Users/jeff/project/github-symphony
+backend/.venv/bin/pyinstaller --clean -y \
+  --name symphony-github-backend \
+  --distpath backend/dist \
+  --workpath backend/build \
+  --specpath backend/build \
+  --paths backend/src \
+  --collect-submodules uvicorn \
+  --collect-submodules fastapi \
+  --collect-submodules starlette \
+  --collect-submodules pydantic \
+  backend/packaging/backend_entry.py
+
+cd /Users/jeff/project/github-symphony/desktop
+npm run package
+```
+
+生成产物位于 `desktop/release/GitHub Symphony-0.1.0-arm64.dmg`。当前包未做 Developer ID notarization，分发给其他 macOS 设备时可能触发 Gatekeeper 提示。
 
 ## GitHub Token
 

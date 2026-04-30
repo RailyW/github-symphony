@@ -2,6 +2,8 @@
   "name": "github-symphony-desktop",
   "private": true,
   "version": "0.1.0",
+  "description": "Desktop dashboard for the GitHub Projects v2 Codex orchestrator.",
+  "author": "GitHub Symphony Contributors",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -22,8 +24,8 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.3",
     "wait-on": "^8.0.1"
@@ -39,11 +41,25 @@
       "dist-electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/symphony-github-backend",
+        "to": "backend/symphony-github-backend"
+      },
+      {
+        "from": "../WORKFLOW.example.md",
+        "to": "WORKFLOW.example.md"
+      }
+    ],
     "mac": {
-      "target": ["dmg"]
+      "target": [
+        "dmg"
+      ]
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     }
   }
 }

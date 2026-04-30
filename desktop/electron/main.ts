@@ -25,12 +25,31 @@ function startBackend(): void {
     return;
   }
 
-  const projectRoot = path.resolve(__dirname, "..", "..");
-  const backendSource = path.join(projectRoot, "backend", "src");
+  const projectRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
+  const backendSource = app.isPackaged
+    ? path.join(process.resourcesPath, "backend", "src")
+    : path.join(projectRoot, "backend", "src");
   const workflowPath =
     process.env.SYMPHONY_WORKFLOW || path.join(projectRoot, "WORKFLOW.example.md");
-  const pythonCommand = process.env.SYMPHONY_PYTHON || "python3";
-  const backendPort = process.env.SYMPHONY_BACKEND_PORT || "8765";
+  const packagedBackend = path.join(
+    process.resourcesPath,
+    "backend",
+    "symphony-github-backend",
+    "symphony-github-backend",
+  );
+  const backendCommand = process.env.SYMPHONY_PYTHON || (app.isPackaged ? packagedBackend : "python3");
+  const backendArgs = app.isPackaged
+    ? ["run", workflowPath, "--host", "127.0.0.1", "--port", process.env.SYMPHONY_BACKEND_PORT || "8765"]
+    : [
+        "-m",
+        "symphony_github",
+        "run",
+        workflowPath,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        process.env.SYMPHONY_BACKEND_PORT || "8765",
+      ];
 
   const env = {
     ...process.env,
@@ -38,17 +57,8 @@ function startBackend(): void {
   };
 
   backendProcess = spawn(
-    pythonCommand,
-    [
-      "-m",
-      "symphony_github",
-      "run",
-      workflowPath,
-      "--host",
-      "127.0.0.1",
-      "--port",
-      backendPort,
-    ],
+    backendCommand,
+    backendArgs,
     {
       cwd: projectRoot,
       env,
