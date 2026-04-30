@@ -13,6 +13,11 @@ from symphony_github.core.events import EventStore
 from symphony_github.core.models import RunRecord, WorkItem
 from symphony_github.core.orchestrator import Orchestrator
 from symphony_github.core.prompt import PromptRenderError, render_prompt
+from symphony_github.core.settings import (
+    export_workflow_text,
+    import_workflow_text,
+    normalize_app_settings,
+)
 from symphony_github.core.workflow import load_workflow
 from symphony_github.integrations.github.client import GitHubClient
 from symphony_github.integrations.github.dynamic_tools import GitHubDynamicTools
@@ -94,7 +99,13 @@ class FakeGitHubClient(GitHubClient):
         return {"data": {"ok": True}}
 
     # 函数说明：记录 REST 调用并返回固定响应。
-    async def rest(self, method: str, path: str, query: Dict | None = None, body: Dict | None = None):
+    async def rest(
+        self,
+        method: str,
+        path: str,
+        query: Dict | None = None,
+        body: Dict | None = None,
+    ):
         self.calls.append(("rest", method, path, query or {}, body))
         return {"ok": True}
 
@@ -126,6 +137,85 @@ class DynamicToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("read_write", result.content_items[0]["text"])
 
+
+class AppSettingsTest(unittest.IsolatedAsyncioTestCase):
+    """验证 App 内配置和 WORKFLOW.md 兼容能力。"""
+
+    # 函数说明：测试 WORKFLOW.md 导入不会丢失 prompt，也不会保存明文 token。
+    def test_import_workflow_text_keeps_prompt_and_warns_for_plain_token(self) -> None:
+        result = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo]
+  api_token: plain-secret
+workspace:
+  root: /tmp/github-symphony-test
+---
+请处理 {{ issue.identifier }}
+"""
+        )
+
+        self.assertEqual(result.settings["tracker"]["owner"], "acme")
+        self.assertEqual(result.settings["prompt_template"], "请处理 {{ issue.identifier }}")
+        self.assertEqual(result.token_hint, "plain-secret")
+        self.assertTrue(result.warnings)
+
+    # 函数说明：测试 App settings 可导出为可再次解析的 WORKFLOW.md，且不泄露真实 token。
+    def test_export_workflow_text_uses_token_placeholder(self) -> None:
+        imported = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo]
+workspace:
+  root: /tmp/github-symphony-test
+---
+Prompt body
+"""
+        )
+
+        text = export_workflow_text(imported.settings)
+
+        self.assertIn("api_token: $GITHUB_TOKEN", text)
+        self.assertIn("Prompt body", text)
+        self.assertNotIn("plain-secret", text)
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / "WORKFLOW.md"
+            workflow_path.write_text(text, encoding="utf-8")
+            document = load_workflow(str(workflow_path))
+            self.assertEqual(document.config.tracker.owner, "acme")
+
+    # 函数说明：测试 App settings 归一化会覆盖默认值并复用原配置校验。
+    def test_normalize_app_settings_builds_full_config(self) -> None:
+        imported = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: user
+  owner: octo
+  project_number: 9
+  repositories:
+    - octo/demo
+workspace:
+  root: /tmp/github-symphony-test
+---
+Prompt body
+"""
+        )
+
+        document = normalize_app_settings(imported.settings, github_token="token")
+
+        self.assertEqual(document.config.tracker.owner_type, "user")
+        self.assertEqual(document.config.tracker.api_token, "token")
+        self.assertEqual(document.config.agent.max_concurrent_agents, 3)
+
     # 函数说明：测试 REST 工具拒绝配置仓库之外的路径。
     async def test_rest_path_must_be_allowlisted(self) -> None:
         config = build_config(
@@ -141,7 +231,10 @@ class DynamicToolsTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         tools = GitHubDynamicTools(FakeGitHubClient(), config.tracker, config.tools.github)
-        result = await tools.execute("github_rest", {"method": "GET", "path": "/repos/other/repo/issues"})
+        result = await tools.execute(
+            "github_rest",
+            {"method": "GET", "path": "/repos/other/repo/issues"},
+        )
 
         self.assertFalse(result.success)
         self.assertIn("not allowlisted", result.content_items[0]["text"])
@@ -188,7 +281,13 @@ class FakeProjectClient(GitHubClient):
         raise AssertionError(f"unexpected query: {query}")
 
     # 函数说明：模拟 issue dependencies REST 响应。
-    async def rest(self, method: str, path: str, query: Dict | None = None, body: Dict | None = None):
+    async def rest(
+        self,
+        method: str,
+        path: str,
+        query: Dict | None = None,
+        body: Dict | None = None,
+    ):
         if path.endswith("/issues/2/dependencies/blocked_by"):
             return [{"state": "open"}]
         return []
@@ -242,7 +341,12 @@ class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         client = FakeProjectClient()
-        tracker = GitHubProjectsV2Tracker(config.tracker, config.blocker_policy, client, EventStore())
+        tracker = GitHubProjectsV2Tracker(
+            config.tracker,
+            config.blocker_policy,
+            client,
+            EventStore(),
+        )
 
         await tracker.update_project_status("PVTI_1", "Done")
 
@@ -270,6 +374,14 @@ class FakeTracker:
     async def fetch_issue_states_by_ids(self, issue_ids: List[str]) -> Dict[str, WorkItem]:
         wanted = set(issue_ids)
         return {item.id: item for item in self.items if item.id in wanted}
+
+
+class FailingTracker(FakeTracker):
+    """用于验证调度主循环异常隔离的假 tracker。"""
+
+    # 函数说明：模拟 GitHub API 或配置错误导致候选任务读取失败。
+    async def fetch_candidate_issues(self) -> List[WorkItem]:
+        raise RuntimeError("boom from tracker")
 
 
 class FakeRunner:
@@ -303,6 +415,7 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
                     "owner": "acme",
                     "project_number": 1,
                     "repositories": ["acme/demo"],
+                    "api_token": "fake-token",
                     "active_states": ["Todo"],
                     "terminal_states": ["Done"],
                 },
@@ -326,6 +439,152 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("I_2", orchestrator.running)
         self.assertNotIn("I_1", orchestrator.running)
+        release.set()
+        await asyncio.sleep(0)
+
+
+class SettingsApiTest(unittest.IsolatedAsyncioTestCase):
+    """验证 Settings API 响应结构和热应用入口。"""
+
+    # 函数说明：测试 validate/apply/state 三个接口能协同更新 generation。
+    def test_settings_api_validate_apply_and_state(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from symphony_github.api.server import create_app
+
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_template="old",
+            tracker=FakeTracker([]),
+            runner_factory=lambda: FakeRunner(asyncio.Event()),
+            events=EventStore(),
+        )
+        client = TestClient(create_app(orchestrator))
+        settings = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 2
+  repositories: [acme/demo]
+workspace:
+  root: /tmp/github-symphony-test
+---
+Prompt body
+"""
+        ).settings
+
+        validate_response = client.post("/api/v1/settings/validate", json={"settings": settings})
+        self.assertEqual(validate_response.status_code, 200)
+        self.assertTrue(validate_response.json()["ok"])
+
+        apply_response = client.post("/api/v1/settings/apply", json={"settings": settings})
+        self.assertEqual(apply_response.status_code, 400)
+        self.assertIn("GitHub token 未配置", apply_response.json()["detail"])
+
+        apply_response = client.post(
+            "/api/v1/settings/apply",
+            json={"settings": settings, "github_token": "fake-token"},
+        )
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertEqual(apply_response.json()["generation"], 2)
+
+        state_response = client.get("/api/v1/state")
+        self.assertEqual(state_response.status_code, 200)
+        self.assertEqual(state_response.json()["settings_generation"], 2)
+
+    # 函数说明：测试后台 run_forever 捕获 poll 异常，不让服务任务直接退出。
+    async def test_run_forever_keeps_running_after_poll_error(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "api_token": "fake-token",
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "agent": {"poll_interval_ms": 1000},
+            }
+        )
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_template="old",
+            tracker=FailingTracker([]),
+            runner_factory=lambda: FakeRunner(asyncio.Event()),
+            events=EventStore(),
+        )
+
+        task = asyncio.create_task(orchestrator.run_forever())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertFalse(task.done())
+        self.assertIn("boom from tracker", orchestrator.snapshot().settings_error or "")
+        self.assertTrue(
+            any(
+                event.event_type == "orchestrator.poll_error"
+                for event in orchestrator.events.recent(10)
+            )
+        )
+
+        await orchestrator.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    # 函数说明：测试热重配不会取消已经运行的旧 generation agent。
+    async def test_reconfigure_keeps_existing_running_agents(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "api_token": "fake-token",
+                    "active_states": ["Todo"],
+                    "terminal_states": ["Done"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        release = asyncio.Event()
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_template="old",
+            tracker=FakeTracker([_item("I_1", "acme/demo#1", blocked_by_open_count=0)]),
+            runner_factory=lambda: FakeRunner(release),
+            events=EventStore(),
+        )
+
+        await orchestrator.poll_once()
+        generation = orchestrator.reconfigure(
+            config=config,
+            prompt_template="new",
+            tracker=FakeTracker([]),
+            runner_factory=lambda: FakeRunner(release),
+        )
+        await orchestrator.poll_once()
+
+        self.assertEqual(generation, 2)
+        self.assertIn("I_1", orchestrator.running)
+        self.assertEqual(orchestrator.snapshot().settings_generation, 2)
         release.set()
         await asyncio.sleep(0)
 

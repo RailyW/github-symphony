@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Protocol, Set
+from typing import Callable, Dict, List, Optional, Protocol, Set
 
 from .config import SymphonyConfig
 from .events import EventStore
@@ -58,17 +58,61 @@ class Orchestrator:
         self._tasks: Dict[str, asyncio.Task] = {}
         self._claimed: Set[str] = set()
         self._retry: Dict[str, RetryEntry] = {}
+        self._run_generations: Dict[str, int] = {}
         self._last_candidates: List[WorkItem] = []
         self._last_poll_at: Optional[str] = None
+        self.settings_generation = 1
+        self.settings_error: Optional[str] = None
         self._stopped = asyncio.Event()
         self._refresh_requested = asyncio.Event()
+
+    # 函数说明：热替换后续调度使用的配置和运行时依赖，不影响已经运行的 agent。
+    def reconfigure(
+        self,
+        config: SymphonyConfig,
+        prompt_template: str,
+        tracker: TrackerProtocol,
+        runner_factory: Callable[[], AgentRunner],
+    ) -> int:
+        self.config = config
+        self.prompt_template = prompt_template
+        self.tracker = tracker
+        self.runner_factory = runner_factory
+        self.settings_generation += 1
+        self.settings_error = None
+        self._last_candidates = []
+        self._refresh_requested.set()
+        self.events.append(
+            "orchestrator.reconfigured",
+            "App 设置已热应用，后续调度将使用新配置",
+            {"settings_generation": self.settings_generation},
+        )
+        return self.settings_generation
+
+    # 函数说明：记录设置应用失败，供 API state 和 UI 展示。
+    def mark_settings_error(self, message: str) -> None:
+        self.settings_error = message
+        self.events.append("orchestrator.settings_error", "App 设置应用失败", {"error": message})
 
     # 函数说明：启动主循环，直到 stop 被调用。
     async def run_forever(self) -> None:
         self.events.append("orchestrator.started", "GitHub Symphony 调度器已启动")
 
         while not self._stopped.is_set():
-            await self.poll_once()
+            try:
+                await self.poll_once()
+                self.settings_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 后台调度不能因为一次 GitHub/Codex 异常退出。
+                # 逻辑说明：poll 失败通常来自 token、Project 权限、网络或字段配置。
+                # 这里把错误保留到 state 和事件流，UI 能直接展示，调度循环继续等待下次刷新。
+                self.settings_error = str(exc)
+                self.events.append(
+                    "orchestrator.poll_error",
+                    "调度器刷新失败，已保留进程并等待下一次 poll",
+                    {"error": str(exc)},
+                )
 
             # 逻辑说明：等待 poll interval 或手动 refresh，二者任一发生就进入下一轮。
             try:
@@ -97,6 +141,14 @@ class Orchestrator:
     # 函数说明：执行一次 tracker poll、状态回查和派发。
     async def poll_once(self) -> None:
         self._last_poll_at = datetime.now(timezone.utc).isoformat()
+        # 逻辑说明：GitHub Projects v2 读取依赖 token。无 token 时直接进入可观测错误状态，
+        # 避免向 GitHub 发起必然失败的未认证 GraphQL 请求，也让 UI 显示更可操作的提示。
+        if not self.config.tracker.api_token:
+            self._last_candidates = []
+            raise RuntimeError(
+                "GitHub token 未配置：请在 Settings / GitHub Project 保存 PAT，"
+                "或设置 GITHUB_TOKEN 后重新应用。"
+            )
         await self._reconcile_running()
         candidates = await self.tracker.fetch_candidate_issues()
         self._last_candidates = sorted(candidates, key=_dispatch_sort_key)
@@ -116,6 +168,7 @@ class Orchestrator:
         self._tasks.pop(issue_id, None)
         self.running.pop(issue_id, None)
         self._claimed.discard(issue_id)
+        self._run_generations.pop(issue_id, None)
         self.events.append("orchestrator.run_stopped", "已停止本地运行", {"issue_id": issue_id})
         return True
 
@@ -138,6 +191,8 @@ class Orchestrator:
             candidates=self._last_candidates,
             recent_events=self.events.recent(100),
             last_poll_at=self._last_poll_at,
+            settings_generation=self.settings_generation,
+            settings_error=self.settings_error,
         )
 
     # 函数说明：按 tracker 状态回收已移出 active states 的运行。
@@ -145,8 +200,20 @@ class Orchestrator:
         if not self.running:
             return
 
-        refreshed = await self.tracker.fetch_issue_states_by_ids(list(self.running.keys()))
-        for issue_id, run in list(self.running.items()):
+        current_issue_ids = [
+            issue_id
+            for issue_id in self.running
+            if self._run_generations.get(issue_id, self.settings_generation)
+            == self.settings_generation
+        ]
+        if not current_issue_ids:
+            return
+
+        # 逻辑说明：只用当前 generation 的 tracker 回查当前 generation 的任务。
+        # 热重配前已启动的 agent 保持运行，避免新 Project/仓库配置误停旧任务。
+        refreshed = await self.tracker.fetch_issue_states_by_ids(current_issue_ids)
+        for issue_id in current_issue_ids:
+            run = self.running[issue_id]
             latest = refreshed.get(issue_id)
 
             # 逻辑说明：任务消失或离开 active states 时，停止本地运行记录。
@@ -156,6 +223,7 @@ class Orchestrator:
                     task.cancel()
                 self.running.pop(issue_id, None)
                 self._claimed.discard(issue_id)
+                self._run_generations.pop(issue_id, None)
                 self.events.append(
                     "orchestrator.reconciled",
                     "运行中任务已不再处于 active state",
@@ -188,17 +256,27 @@ class Orchestrator:
             workspace="",
         )
         self.running[item.id] = run_record
+        self._run_generations[item.id] = self.settings_generation
         self.events.append(
             "orchestrator.dispatched",
             "任务已派发给 Codex runner",
             {"identifier": item.identifier, "issue_id": item.id},
         )
-        self._tasks[item.id] = asyncio.create_task(self._run_item(item, run_record))
+        runner_factory = self.runner_factory
+        self._tasks[item.id] = asyncio.create_task(
+            self._run_item(item, run_record, runner_factory)
+        )
 
     # 函数说明：执行后台 runner，并根据结果登记重试。
-    async def _run_item(self, item: WorkItem, run_record: RunRecord) -> None:
+    async def _run_item(
+        self,
+        item: WorkItem,
+        run_record: RunRecord,
+        runner_factory: Callable[[], AgentRunner],
+    ) -> None:
         try:
-            runner: AgentRunner = self.runner_factory()
+            # 逻辑说明：runner_factory 在派发瞬间捕获，确保热重配不会改变已派发 agent 的配置。
+            runner: AgentRunner = runner_factory()
             result = await runner.run(item, run_record)
 
             if result.should_continue:
@@ -209,6 +287,7 @@ class Orchestrator:
             self._claimed.discard(item.id)
             self.running.pop(item.id, None)
             self._tasks.pop(item.id, None)
+            self._run_generations.pop(item.id, None)
 
     # 函数说明：判断失败重试是否已经到时间。
     def _retry_ready(self, issue_id: str) -> bool:

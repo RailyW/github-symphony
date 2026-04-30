@@ -8,16 +8,13 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from symphony_github.api.server import run_app
 from symphony_github.core.events import EventStore
 from symphony_github.core.orchestrator import Orchestrator
-from symphony_github.core.runner import AgentRunner
+from symphony_github.core.runtime import build_runtime_components
 from symphony_github.core.workflow import load_workflow
-from symphony_github.integrations.github.client import GitHubClient
-from symphony_github.integrations.github.dynamic_tools import GitHubDynamicTools
-from symphony_github.integrations.github.tracker import GitHubProjectsV2Tracker
 
 
 # 函数说明：CLI 主入口，负责解析参数并分派子命令。
@@ -61,34 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
 def run_command(args: argparse.Namespace) -> int:
     workflow = load_workflow(args.workflow)
     events = EventStore()
-    client = GitHubClient(
-        token=workflow.config.tracker.api_token,
-        api_base_url=workflow.config.tracker.api_base_url,
-        graphql_url=workflow.config.tracker.graphql_url,
-    )
-    tracker = GitHubProjectsV2Tracker(
-        config=workflow.config.tracker,
-        blocker_policy=workflow.config.blocker_policy,
-        client=client,
-        events=events,
-    )
-    github_tools = GitHubDynamicTools(client, workflow.config.tracker, workflow.config.tools.github)
-
-    # 函数说明：为每个 dispatch 创建新的 runner，避免跨任务共享 Codex client 状态。
-    def runner_factory() -> AgentRunner:
-        return AgentRunner(
-            config=workflow.config,
-            prompt_template=workflow.prompt_template,
-            tracker=tracker,
-            events=events,
-            github_tools=github_tools,
-        )
+    runtime = build_runtime_components(workflow.config, workflow.prompt_template, events)
 
     orchestrator = Orchestrator(
-        config=workflow.config,
-        prompt_template=workflow.prompt_template,
-        tracker=tracker,
-        runner_factory=runner_factory,
+        config=runtime.config,
+        prompt_template=runtime.prompt_template,
+        tracker=runtime.tracker,
+        runner_factory=runtime.runner_factory,
         events=events,
     )
     run_app(orchestrator, host=args.host, port=args.port)

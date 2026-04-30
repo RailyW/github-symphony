@@ -92,6 +92,8 @@ class StateSnapshot:
     candidates: List[WorkItem]
     recent_events: List[EventRecord]
     last_poll_at: Optional[str] = None
+    settings_generation: int = 1
+    settings_error: Optional[str] = None
 
     # 函数说明：把快照转换为 API 层可直接返回的字典。
     def to_dict(self) -> Dict[str, Any]:

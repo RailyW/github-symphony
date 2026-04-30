@@ -46,12 +46,99 @@ export type StateSnapshot = {
   candidates: WorkItem[];
   recent_events: EventRecord[];
   last_poll_at: string | null;
+  settings_generation: number;
+  settings_error: string | null;
+};
+
+export type AppSettings = {
+  tracker: {
+    owner_type: "org" | "user";
+    owner: string;
+    project_number: number;
+    repositories: string[];
+    status_field: string;
+    active_states: string[];
+    terminal_states: string[];
+    priority_field: string | null;
+    api_base_url: string;
+    graphql_url: string;
+  };
+  blocker_policy: {
+    kind: string;
+    unavailable_behavior: string;
+  };
+  workspace: {
+    root: string;
+    cleanup_terminal_workspaces: boolean;
+    hooks: {
+      after_create: string | null;
+    };
+  };
+  agent: {
+    max_concurrent_agents: number;
+    max_turns: number;
+    poll_interval_ms: number;
+    max_retry_backoff_ms: number;
+  };
+  codex: {
+    command: string;
+    model: string | null;
+    approval_policy: unknown;
+    thread_sandbox: string;
+    turn_sandbox_policy: unknown;
+  };
+  tools: {
+    github: {
+      enabled: boolean;
+      mode: "read_only" | "read_write";
+    };
+  };
+  prompt_template: string;
+};
+
+export type TokenStatus = {
+  configured: boolean;
+  encryptionAvailable: boolean;
+};
+
+export type TokenUpdate =
+  | { mode: "unchanged" }
+  | { mode: "set"; value: string }
+  | { mode: "clear" };
+
+export type SettingsLoadResult = {
+  settings: AppSettings;
+  token: TokenStatus;
+  settingsPath: string;
 };
 
 declare global {
   interface Window {
     symphony?: {
       apiBaseUrl: string;
+    };
+    symphonySettings?: {
+      load: () => Promise<SettingsLoadResult>;
+      save: (settings: AppSettings, tokenUpdate: TokenUpdate) => Promise<SettingsLoadResult>;
+      apply: (settings: AppSettings) => Promise<{ status: string; generation: number }>;
+      importWorkflow: () => Promise<
+        | { canceled: true }
+        | {
+            canceled: false;
+            sourcePath: string;
+            settings: AppSettings;
+            token_hint: string | null;
+            warnings: string[];
+          }
+      >;
+      exportWorkflow: (settings: AppSettings) => Promise<
+        | { canceled: true }
+        | {
+            canceled: false;
+            filePath: string;
+          }
+      >;
+      tokenStatus: () => Promise<TokenStatus>;
     };
   }
 }
