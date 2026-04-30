@@ -12,10 +12,22 @@ from symphony_github.core.orchestrator import Orchestrator
 def create_app(orchestrator: Orchestrator):
     try:
         from fastapi import FastAPI, HTTPException
+        from fastapi.middleware.cors import CORSMiddleware
     except Exception as exc:  # noqa: BLE001 - 运行入口需要清晰提示缺依赖。
         raise RuntimeError("缺少 FastAPI，请先在 backend 中执行 python -m pip install -e .") from exc
 
     app = FastAPI(title="GitHub Symphony", version="0.1.0")
+
+    # 逻辑说明：Electron 打包后通过 file:// 加载 React 静态页面，
+    # 浏览器安全模型会把 file:// 到 http://127.0.0.1 的请求视为跨源请求。
+    # 后端只绑定本机地址，且不使用浏览器 cookie，因此这里允许本地桌面前端跨源访问 API。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
     # 函数说明：返回当前运行状态快照。
     @app.get("/api/v1/state")

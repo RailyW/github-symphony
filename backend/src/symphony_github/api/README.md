@@ -2,6 +2,8 @@
 
 `api` 模块向 Electron/React 客户端提供本地 HTTP 控制面。
 
+Electron 打包版通过 `file://` 读取 React 页面，因此浏览器会把页面到 `http://127.0.0.1` 的请求视为跨源请求。`server.py` 已启用 FastAPI CORS middleware，允许本地桌面页面访问 API；服务仍应保持仅监听 loopback 地址。
+
 ## 端点
 
 - `GET /api/v1/state`

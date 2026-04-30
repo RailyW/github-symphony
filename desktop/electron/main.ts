@@ -16,7 +16,8 @@ function isDevelopment(): boolean {
 
 // 函数说明：计算本地后端 API 地址，renderer 通过 preload 读取同一个值。
 function apiBaseUrl(): string {
-  return process.env.SYMPHONY_API_BASE_URL || "http://127.0.0.1:8765";
+  const backendPort = process.env.SYMPHONY_BACKEND_PORT || "8765";
+  return process.env.SYMPHONY_API_BASE_URL || `http://127.0.0.1:${backendPort}`;
 }
 
 // 函数说明：启动 Python 后端进程；如果用户提供外部 API 地址则不重复启动。
@@ -81,7 +82,7 @@ function startBackend(): void {
 
 // 函数说明：创建主窗口并加载 Vite 或打包后的静态页面。
 function createWindow(): void {
-  const preloadPath = path.join(__dirname, "preload.js");
+  const preloadPath = path.join(__dirname, "preload.cjs");
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
