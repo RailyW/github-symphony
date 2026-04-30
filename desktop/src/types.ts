@@ -112,6 +112,59 @@ export type SettingsLoadResult = {
   settingsPath: string;
 };
 
+export type GitHubDiscoveryRequest = {
+  github_token?: string;
+  use_saved_token?: boolean;
+  api_base_url?: string;
+  graphql_url?: string;
+};
+
+export type GitHubOwnerOption = {
+  owner_type: "org" | "user";
+  login: string;
+  display_name: string | null;
+};
+
+export type GitHubDiscoveryConnectResult = {
+  viewer: {
+    login: string;
+    name: string | null;
+  };
+  owners: GitHubOwnerOption[];
+  warnings: string[];
+};
+
+export type GitHubProjectOption = {
+  id: string;
+  number: number;
+  title: string;
+  owner: string;
+  owner_type: "org" | "user";
+  closed: boolean;
+  updated_at: string | null;
+};
+
+export type GitHubProjectFieldOption = {
+  id: string;
+  name: string;
+  data_type: string;
+  kind: "single_select" | "number" | "text" | "other";
+  options: Array<{
+    id: string;
+    name: string;
+    color: string | null;
+  }>;
+};
+
+export type GitHubProjectDiscoveryResult = {
+  fields: GitHubProjectFieldOption[];
+  status_fields: GitHubProjectFieldOption[];
+  priority_fields: GitHubProjectFieldOption[];
+  repositories: string[];
+  item_sample_count: number;
+  warnings: string[];
+};
+
 declare global {
   interface Window {
     symphony?: {
@@ -139,6 +192,19 @@ declare global {
           }
       >;
       tokenStatus: () => Promise<TokenStatus>;
+      discoverConnect: (
+        request: GitHubDiscoveryRequest,
+      ) => Promise<GitHubDiscoveryConnectResult>;
+      discoverProjects: (
+        request: GitHubDiscoveryRequest & { owner_type: "org" | "user"; owner: string },
+      ) => Promise<{ projects: GitHubProjectOption[]; warnings: string[] }>;
+      discoverProject: (
+        request: GitHubDiscoveryRequest & {
+          owner_type: "org" | "user";
+          owner: string;
+          project_number: number;
+        },
+      ) => Promise<GitHubProjectDiscoveryResult>;
     };
   }
 }

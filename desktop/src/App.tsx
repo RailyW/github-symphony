@@ -20,6 +20,9 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchState, refreshState, restartRun, stopRun } from "./api";
 import {
+  discoverConnect,
+  discoverProject,
+  discoverProjects,
   applySettings,
   exportWorkflow,
   importWorkflow,
@@ -30,6 +33,11 @@ import {
 import type {
   AppSettings,
   EventRecord,
+  GitHubDiscoveryConnectResult,
+  GitHubOwnerOption,
+  GitHubProjectDiscoveryResult,
+  GitHubProjectFieldOption,
+  GitHubProjectOption,
   RunRecord,
   SettingsLoadResult,
   StateSnapshot,
@@ -420,6 +428,8 @@ function SettingsPage({
               tokenMode={tokenMode}
               onTokenInput={setTokenInput}
               onTokenMode={setTokenMode}
+              onMessage={onMessage}
+              onError={onError}
               onChange={onSettingsChange}
             />
           ) : null}
@@ -454,6 +464,8 @@ function GitHubSettings({
   tokenMode,
   onTokenInput,
   onTokenMode,
+  onMessage,
+  onError,
   onChange,
 }: {
   settings: AppSettings;
@@ -462,90 +474,186 @@ function GitHubSettings({
   tokenMode: TokenUpdate["mode"];
   onTokenInput: (value: string) => void;
   onTokenMode: (mode: TokenUpdate["mode"]) => void;
+  onMessage: (message: string | null) => void;
+  onError: (message: string | null) => void;
   onChange: (settings: AppSettings) => void;
 }): JSX.Element {
+  const [owners, setOwners] = useState<GitHubOwnerOption[]>([]);
+  const [projects, setProjects] = useState<GitHubProjectOption[]>([]);
+  const [projectDiscovery, setProjectDiscovery] = useState<GitHubProjectDiscoveryResult | null>(null);
+  const [selectedOwnerKey, setSelectedOwnerKey] = useState(
+    `${settings.tracker.owner_type}:${settings.tracker.owner}`,
+  );
+  const [selectedProjectNumber, setSelectedProjectNumber] = useState(
+    String(settings.tracker.project_number || ""),
+  );
+  const [discoverySource, setDiscoverySource] = useState<"input" | "saved">("input");
+  const [busyDiscovery, setBusyDiscovery] = useState(false);
+
+  // 函数说明：拼装 discovery 请求；临时 PAT 和已保存 token 二选一，不写入 settings 文件。
+  const buildDiscoveryRequest = useCallback(
+    (source: "input" | "saved") => ({
+      github_token: source === "input" ? tokenInput.trim() : undefined,
+      use_saved_token: source === "saved",
+      api_base_url: settings.tracker.api_base_url,
+      graphql_url: settings.tracker.graphql_url,
+    }),
+    [settings.tracker.api_base_url, settings.tracker.graphql_url, tokenInput],
+  );
+
+  // 函数说明：统一执行 discovery 动作，避免多处重复 busy/error 处理。
+  const runDiscovery = useCallback(
+    async (action: () => Promise<void>) => {
+      setBusyDiscovery(true);
+      onError(null);
+      onMessage(null);
+      try {
+        await action();
+      } catch (caught) {
+        onError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setBusyDiscovery(false);
+      }
+    },
+    [onError, onMessage],
+  );
+
+  // 函数说明：按 owner 读取 Project 列表，并在可能时自动选择当前配置或第一个 Project。
+  const loadProjectsForOwner = useCallback(
+    async (owner: GitHubOwnerOption, source: "input" | "saved") => {
+      const result = await discoverProjects({
+        ...buildDiscoveryRequest(source),
+        owner_type: owner.owner_type,
+        owner: owner.login,
+      });
+      setProjects(result.projects);
+      setProjectDiscovery(null);
+
+      const preferredProject = result.projects.find(
+        (project) => project.number === settings.tracker.project_number,
+      ) || result.projects[0];
+      setSelectedProjectNumber(preferredProject ? String(preferredProject.number) : "");
+
+      updateSettings(onChange, settings, (draft) => {
+        draft.tracker.owner_type = owner.owner_type;
+        draft.tracker.owner = owner.login;
+        if (preferredProject) {
+          draft.tracker.project_number = preferredProject.number;
+        }
+      });
+    },
+    [buildDiscoveryRequest, onChange, settings],
+  );
+
+  // 函数说明：连接 GitHub 并读取 owner 列表，随后自动加载当前或默认 owner 的 Projects。
+  const handleConnect = useCallback(
+    async (source: "input" | "saved") => {
+      await runDiscovery(async () => {
+        setDiscoverySource(source);
+        const result: GitHubDiscoveryConnectResult = await discoverConnect(
+          buildDiscoveryRequest(source),
+        );
+        setOwners(result.owners);
+
+        const currentOwner = result.owners.find(
+          (owner) => `${owner.owner_type}:${owner.login}` === selectedOwnerKey,
+        ) || result.owners[0];
+        if (!currentOwner) {
+          throw new Error("当前 PAT 未返回可用 owner，请检查 token 权限。");
+        }
+        const nextOwnerKey = `${currentOwner.owner_type}:${currentOwner.login}`;
+        setSelectedOwnerKey(nextOwnerKey);
+        await loadProjectsForOwner(currentOwner, source);
+        onMessage(`已连接 GitHub：${result.viewer.login}`);
+      });
+    },
+    [
+      buildDiscoveryRequest,
+      loadProjectsForOwner,
+      onMessage,
+      runDiscovery,
+      selectedOwnerKey,
+    ],
+  );
+
+  // 函数说明：用户切换 owner 后刷新 Project 列表。
+  const handleOwnerChange = useCallback(
+    async (ownerKey: string) => {
+      setSelectedOwnerKey(ownerKey);
+      const owner = owners.find((item) => `${item.owner_type}:${item.login}` === ownerKey);
+      if (!owner) {
+        return;
+      }
+      await runDiscovery(async () => {
+        await loadProjectsForOwner(owner, discoverySource);
+      });
+    },
+    [discoverySource, loadProjectsForOwner, owners, runDiscovery],
+  );
+
+  // 函数说明：读取 Project 字段和仓库，并用推荐值填充 tracker 配置。
+  const handleInspectProject = useCallback(async () => {
+    await runDiscovery(async () => {
+      const owner = owners.find((item) => `${item.owner_type}:${item.login}` === selectedOwnerKey);
+      if (!owner) {
+        throw new Error("请先选择 GitHub owner。");
+      }
+      const projectNumber = Number(selectedProjectNumber);
+      if (!projectNumber) {
+        throw new Error("请先选择 GitHub Project。");
+      }
+      const result = await discoverProject({
+        ...buildDiscoveryRequest(discoverySource),
+        owner_type: owner.owner_type,
+        owner: owner.login,
+        project_number: projectNumber,
+      });
+      const statusField = chooseStatusField(result.status_fields, settings.tracker.status_field);
+      if (!statusField) {
+        throw new Error("该 Project 没有 single-select Status 字段，请先在 GitHub Project 中创建。");
+      }
+      const priorityField = choosePriorityField(result.priority_fields, settings.tracker.priority_field);
+      const statusOptions = statusField.options.map((option) => option.name);
+      const activeStates = chooseStates(statusOptions, ["Todo", "In Progress", "Rework"], "first");
+      const terminalStates = chooseStates(statusOptions, ["Done", "Closed", "Cancelled"], "last");
+
+      setProjectDiscovery(result);
+      updateSettings(onChange, settings, (draft) => {
+        draft.tracker.owner_type = owner.owner_type;
+        draft.tracker.owner = owner.login;
+        draft.tracker.project_number = projectNumber;
+        draft.tracker.status_field = statusField.name;
+        draft.tracker.priority_field = priorityField?.name || null;
+        draft.tracker.active_states = activeStates;
+        draft.tracker.terminal_states = terminalStates;
+        if (result.repositories.length) {
+          draft.tracker.repositories = result.repositories;
+        }
+      });
+      onMessage("已从 GitHub Project 读取字段、状态选项和仓库列表。");
+    });
+  }, [
+    buildDiscoveryRequest,
+    discoverySource,
+    onChange,
+    onMessage,
+    owners,
+    runDiscovery,
+    selectedOwnerKey,
+    selectedProjectNumber,
+    settings,
+  ]);
+
+  const statusField = projectDiscovery
+    ? chooseStatusField(projectDiscovery.status_fields, settings.tracker.status_field)
+    : null;
+  const statusOptions = statusField?.options.map((option) => option.name) || [];
+
   return (
     <>
       <SectionIntro
         title="GitHub Project"
-        text="配置 GitHub Projects v2 任务来源。Issue/PR 必须在这些仓库和 Project 中，状态字段用于判断是否派发。"
-      />
-      <div className="formGrid">
-        <SelectField
-          label="Owner Type"
-          value={settings.tracker.owner_type}
-          options={["org", "user"]}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.owner_type = value as "org" | "user";
-          })}
-        />
-        <TextField
-          label="Owner"
-          value={settings.tracker.owner}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.owner = value;
-          })}
-        />
-        <NumberField
-          label="Project Number"
-          value={settings.tracker.project_number}
-          min={1}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.project_number = value;
-          })}
-        />
-        <TextField
-          label="Status Field"
-          value={settings.tracker.status_field}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.status_field = value;
-          })}
-        />
-        <TextField
-          label="Priority Field"
-          value={settings.tracker.priority_field || ""}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.priority_field = value || null;
-          })}
-        />
-        <TextField
-          label="GitHub REST API"
-          value={settings.tracker.api_base_url}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.api_base_url = value;
-          })}
-        />
-        <TextField
-          label="GitHub GraphQL API"
-          value={settings.tracker.graphql_url}
-          onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.tracker.graphql_url = value;
-          })}
-        />
-      </div>
-      <ListEditor
-        label="Repositories"
-        values={settings.tracker.repositories}
-        placeholder="owner/repo"
-        onChange={(values) => updateSettings(onChange, settings, (draft) => {
-          draft.tracker.repositories = values;
-        })}
-      />
-      <ListEditor
-        label="Active States"
-        values={settings.tracker.active_states}
-        placeholder="Todo"
-        onChange={(values) => updateSettings(onChange, settings, (draft) => {
-          draft.tracker.active_states = values;
-        })}
-      />
-      <ListEditor
-        label="Terminal States"
-        values={settings.tracker.terminal_states}
-        placeholder="Done"
-        onChange={(values) => updateSettings(onChange, settings, (draft) => {
-          draft.tracker.terminal_states = values;
-        })}
+        text="先连接 GitHub，再选择 owner、Project、Status 字段和状态集合；大部分配置会从 GitHub 自动读取。"
       />
       <div className="tokenBox">
         <div>
@@ -558,21 +666,141 @@ function GitHubSettings({
         <input
           type="password"
           value={tokenInput}
-          placeholder="输入新的 PAT 后点击 Save 或 Save & Apply"
+          placeholder="粘贴 PAT 后点击 Connect；只有 Save 或 Save & Apply 才会保存"
           onChange={(event) => {
             onTokenInput(event.target.value);
             onTokenMode(event.target.value ? "set" : "unchanged");
           }}
         />
-        <button className="secondaryButton dangerText" type="button" onClick={() => {
-          onTokenInput("");
-          onTokenMode("clear");
-        }}>
-          <Trash2 size={15} aria-hidden="true" />
-          Clear Token
-        </button>
+        <div className="buttonRow">
+          <button
+            className="primaryButton"
+            type="button"
+            onClick={() => void handleConnect("input")}
+            disabled={busyDiscovery || !tokenInput.trim()}
+          >
+            Connect PAT
+          </button>
+          <button
+            className="secondaryButton"
+            type="button"
+            onClick={() => void handleConnect("saved")}
+            disabled={busyDiscovery || !tokenStatus.configured}
+          >
+            Use Saved Token
+          </button>
+          <button className="secondaryButton dangerText" type="button" onClick={() => {
+            onTokenInput("");
+            onTokenMode("clear");
+          }}>
+            <Trash2 size={15} aria-hidden="true" />
+            Clear Token
+          </button>
+        </div>
         {tokenMode === "clear" ? <p className="inlineWarning">下次保存会清除已保存 token。</p> : null}
       </div>
+      <div className="discoveryGrid">
+        <SelectField
+          label="Owner"
+          value={selectedOwnerKey}
+          options={owners.map((owner) => `${owner.owner_type}:${owner.login}`)}
+          onChange={(value) => void handleOwnerChange(value)}
+        />
+        <label className="field">
+          <span>Project</span>
+          <select
+            value={selectedProjectNumber}
+            onChange={(event) => {
+              const value = event.target.value;
+              setSelectedProjectNumber(value);
+              updateSettings(onChange, settings, (draft) => {
+                draft.tracker.project_number = Number(value);
+              });
+            }}
+          >
+            {projects.map((project) => (
+              <option value={String(project.number)} key={project.id}>
+                #{project.number} {project.title}{project.closed ? " (closed)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="secondaryButton alignEnd"
+          type="button"
+          onClick={() => void handleInspectProject()}
+          disabled={busyDiscovery || !selectedProjectNumber}
+        >
+          Load Project Details
+        </button>
+      </div>
+      <div className="formGrid">
+        <SelectField
+          label="Status Field"
+          value={settings.tracker.status_field}
+          options={projectDiscovery?.status_fields.map((field) => field.name) || [settings.tracker.status_field]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.tracker.status_field = value;
+          })}
+        />
+        <SelectField
+          label="Priority Field"
+          value={settings.tracker.priority_field || "none"}
+          options={["none", ...(projectDiscovery?.priority_fields.map((field) => field.name) || [])]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.tracker.priority_field = value === "none" ? null : value;
+          })}
+        />
+      </div>
+      {statusOptions.length ? (
+        <div className="statePickerGrid">
+          <OptionChecklist
+            label="Active States"
+            options={statusOptions}
+            selected={settings.tracker.active_states}
+            onChange={(values) => updateSettings(onChange, settings, (draft) => {
+              draft.tracker.active_states = values;
+            })}
+          />
+          <OptionChecklist
+            label="Terminal States"
+            options={statusOptions}
+            selected={settings.tracker.terminal_states}
+            onChange={(values) => updateSettings(onChange, settings, (draft) => {
+              draft.tracker.terminal_states = values;
+            })}
+          />
+        </div>
+      ) : (
+        <div className="inlineHint">连接 GitHub 并加载 Project 后，可以在这里勾选 active/terminal 状态。</div>
+      )}
+      <ListEditor
+        label="Repositories"
+        values={settings.tracker.repositories}
+        placeholder="owner/repo"
+        onChange={(values) => updateSettings(onChange, settings, (draft) => {
+          draft.tracker.repositories = values;
+        })}
+      />
+      <details className="advancedBox">
+        <summary>Advanced API endpoints</summary>
+        <div className="formGrid">
+          <TextField
+            label="GitHub REST API"
+            value={settings.tracker.api_base_url}
+            onChange={(value) => updateSettings(onChange, settings, (draft) => {
+              draft.tracker.api_base_url = value;
+            })}
+          />
+          <TextField
+            label="GitHub GraphQL API"
+            value={settings.tracker.graphql_url}
+            onChange={(value) => updateSettings(onChange, settings, (draft) => {
+              draft.tracker.graphql_url = value;
+            })}
+          />
+        </div>
+      </details>
     </>
   );
 }
@@ -847,8 +1075,9 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "先准备一个 GitHub Project v2，并确保它包含 Status single-select 字段。把要处理的 Issue/PR 加到 Project，并设置 active state，例如 Todo、In Progress 或 Rework。",
       ],
       items: [
-        "在 Settings / GitHub Project 填写 owner、project number、repositories、active states 和 terminal states。",
-        "保存 GitHub PAT。只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub 时需要相应写权限。",
+        "在 Settings / GitHub Project 顶部粘贴 PAT，点击 Connect PAT，然后选择 owner 和 Project。",
+        "点击 Load Project Details，让 App 自动读取 Status 字段、状态选项和 Project 中出现过的仓库。",
+        "只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub 时需要相应写权限。",
         "在 Workspace 设置 root 和 after_create hook。常见 hook 是 git clone 目标仓库到当前工作区。",
         "在 Prompt 中写明 agent 的工作边界、验证要求、是否允许创建分支或远端评论。",
         "点击 Save & Apply，然后回到 Dashboard 看候选任务、运行中 agent 和事件流。",
@@ -873,6 +1102,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
       ],
       items: [
         "GitHub REST/GraphQL API 默认指向 github.com；GitHub Enterprise 后续可改这里。",
+        "GitHub Project 页会通过 PAT discovery 填充 owner、project number、Status 字段、状态和 repositories。",
         "Workspace root 可以使用 ~，每个任务会在 root 下创建独立目录。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
         "Tools mode 为 read_only 时会拒绝 REST 写操作和 GraphQL mutation。",
@@ -1285,6 +1515,86 @@ function ListEditor({
       </div>
     </div>
   );
+}
+
+// 函数说明：渲染从 GitHub Status options 派生出的多选控件。
+function OptionChecklist({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+}): JSX.Element {
+  const selectedSet = new Set(selected);
+
+  // 函数说明：切换单个选项，并保持列表顺序与 GitHub Project 字段选项一致。
+  const toggleOption = useCallback(
+    (option: string) => {
+      const next = selectedSet.has(option)
+        ? selected.filter((item) => item !== option)
+        : options.filter((item) => selectedSet.has(item) || item === option);
+      onChange(next);
+    },
+    [onChange, options, selected, selectedSet],
+  );
+
+  return (
+    <div className="optionChecklist">
+      <span>{label}</span>
+      <div className="checkRows">
+        {options.map((option) => (
+          <label className="checkRow" key={option}>
+            <input
+              type="checkbox"
+              checked={selectedSet.has(option)}
+              onChange={() => toggleOption(option)}
+            />
+            <span>{option}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 函数说明：选择最合适的 Status 字段，优先沿用当前配置，其次使用名为 Status 的字段。
+function chooseStatusField(
+  fields: GitHubProjectFieldOption[],
+  currentName: string,
+): GitHubProjectFieldOption | null {
+  return (
+    fields.find((field) => field.name === currentName)
+    || fields.find((field) => field.name.toLowerCase() === "status")
+    || fields[0]
+    || null
+  );
+}
+
+// 函数说明：选择最合适的 Priority 字段，优先沿用当前配置，其次使用名为 Priority 的字段。
+function choosePriorityField(
+  fields: GitHubProjectFieldOption[],
+  currentName: string | null,
+): GitHubProjectFieldOption | null {
+  return (
+    fields.find((field) => field.name === currentName)
+    || fields.find((field) => field.name.toLowerCase() === "priority")
+    || null
+  );
+}
+
+// 函数说明：根据 GitHub Status options 和常见命名推荐 active/terminal 状态集合。
+function chooseStates(options: string[], preferred: string[], fallback: "first" | "last"): string[] {
+  const preferredSet = new Set(preferred);
+  const matched = options.filter((option) => preferredSet.has(option));
+  if (matched.length) {
+    return matched;
+  }
+  const fallbackValue = fallback === "first" ? options[0] : options[options.length - 1];
+  return fallbackValue ? [fallbackValue] : [];
 }
 
 // 函数说明：根据表单状态生成 token 更新语义。

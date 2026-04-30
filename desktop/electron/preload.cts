@@ -27,4 +27,7 @@ contextBridge.exposeInMainWorld("symphonySettings", {
   importWorkflow: () => ipcRenderer.invoke("settings:import-workflow"),
   exportWorkflow: (settings: unknown) => ipcRenderer.invoke("settings:export-workflow", settings),
   tokenStatus: () => ipcRenderer.invoke("settings:token-status"),
+  discoverConnect: (request: unknown) => ipcRenderer.invoke("settings:discover-connect", request),
+  discoverProjects: (request: unknown) => ipcRenderer.invoke("settings:discover-projects", request),
+  discoverProject: (request: unknown) => ipcRenderer.invoke("settings:discover-project", request),
 });

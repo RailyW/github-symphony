@@ -22,6 +22,16 @@ type StoredSecrets = {
   githubToken?: string;
 };
 
+type DiscoveryRequest = {
+  github_token?: string;
+  use_saved_token?: boolean;
+  api_base_url?: string;
+  graphql_url?: string;
+  owner_type?: string;
+  owner?: string;
+  project_number?: number;
+};
+
 let encryptionAvailableHint = true;
 
 // 函数说明：判断当前是否是 Vite 开发模式。
@@ -269,6 +279,29 @@ async function applySettingsToBackend(settings: Record<string, unknown>): Promis
   });
 }
 
+// 函数说明：为 discovery 请求解析 token；临时 PAT 优先，显式请求时才读取已保存 token。
+async function resolveDiscoveryToken(request: DiscoveryRequest): Promise<string> {
+  const token = String(request.github_token || "").trim();
+  if (token) {
+    return token;
+  }
+  if (request.use_saved_token) {
+    const savedToken = await readGithubToken();
+    if (savedToken) {
+      return savedToken;
+    }
+  }
+  throw new Error("请先输入 GitHub PAT，或选择使用已保存 token。");
+}
+
+// 函数说明：构造 discovery API payload；token 只进入本次本地请求，不会写入 settings。
+async function discoveryPayload(request: DiscoveryRequest): Promise<Record<string, unknown>> {
+  return {
+    ...request,
+    github_token: await resolveDiscoveryToken(request),
+  };
+}
+
 // 函数说明：App 启动后自动把本地 App settings 应用到 Python 后端。
 async function bootstrapSettings(): Promise<void> {
   try {
@@ -306,6 +339,27 @@ function registerSettingsIpc(): void {
   ));
 
   ipcMain.handle("settings:token-status", async () => tokenStatus());
+
+  ipcMain.handle("settings:discover-connect", async (_event, request: DiscoveryRequest) => (
+    backendJson("/api/v1/settings/discovery/connect", {
+      method: "POST",
+      body: JSON.stringify(await discoveryPayload(request || {})),
+    })
+  ));
+
+  ipcMain.handle("settings:discover-projects", async (_event, request: DiscoveryRequest) => (
+    backendJson("/api/v1/settings/discovery/projects", {
+      method: "POST",
+      body: JSON.stringify(await discoveryPayload(request || {})),
+    })
+  ));
+
+  ipcMain.handle("settings:discover-project", async (_event, request: DiscoveryRequest) => (
+    backendJson("/api/v1/settings/discovery/project", {
+      method: "POST",
+      body: JSON.stringify(await discoveryPayload(request || {})),
+    })
+  ));
 
   ipcMain.handle("settings:import-workflow", async () => {
     const result = await dialog.showOpenDialog({

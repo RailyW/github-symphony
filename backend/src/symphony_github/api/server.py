@@ -13,6 +13,10 @@ from symphony_github.core.settings import (
     import_workflow_text,
     normalize_app_settings,
 )
+from symphony_github.integrations.github.discovery import (
+    build_discovery_service,
+    safe_discovery_error,
+)
 
 
 # 函数说明：创建 FastAPI app；把导入放在函数内，使基础测试不依赖 FastAPI。
@@ -116,6 +120,64 @@ def create_app(orchestrator: Orchestrator):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"text": text}
 
+    # 函数说明：用临时 PAT 读取 viewer 和 owner 列表，不保存 token。
+    @app.post("/api/v1/settings/discovery/connect")
+    async def discovery_connect(payload: Dict[str, Any]) -> Dict[str, Any]:
+        token = payload.get("github_token")
+        try:
+            service = build_discovery_service(
+                token,
+                api_base_url=payload.get("api_base_url"),
+                graphql_url=payload.get("graphql_url"),
+            )
+            return await service.connect()
+        except Exception as exc:  # noqa: BLE001 - discovery 错误要作为表单错误展示。
+            raise HTTPException(
+                status_code=400,
+                detail=safe_discovery_error(exc, str(token or "")),
+            ) from exc
+
+    # 函数说明：用临时 PAT 读取指定 owner 下的 Projects v2，不保存 token。
+    @app.post("/api/v1/settings/discovery/projects")
+    async def discovery_projects(payload: Dict[str, Any]) -> Dict[str, Any]:
+        token = payload.get("github_token")
+        try:
+            service = build_discovery_service(
+                token,
+                api_base_url=payload.get("api_base_url"),
+                graphql_url=payload.get("graphql_url"),
+            )
+            return await service.list_projects(
+                owner_type=_payload_string(payload, "owner_type"),
+                owner=_payload_string(payload, "owner"),
+            )
+        except Exception as exc:  # noqa: BLE001 - discovery 错误要作为表单错误展示。
+            raise HTTPException(
+                status_code=400,
+                detail=safe_discovery_error(exc, str(token or "")),
+            ) from exc
+
+    # 函数说明：用临时 PAT 读取 Project 字段、状态选项和可推断仓库，不保存 token。
+    @app.post("/api/v1/settings/discovery/project")
+    async def discovery_project(payload: Dict[str, Any]) -> Dict[str, Any]:
+        token = payload.get("github_token")
+        try:
+            service = build_discovery_service(
+                token,
+                api_base_url=payload.get("api_base_url"),
+                graphql_url=payload.get("graphql_url"),
+            )
+            return await service.inspect_project(
+                owner_type=_payload_string(payload, "owner_type"),
+                owner=_payload_string(payload, "owner"),
+                project_number=int(_payload_present(payload, "project_number")),
+            )
+        except Exception as exc:  # noqa: BLE001 - discovery 错误要作为表单错误展示。
+            raise HTTPException(
+                status_code=400,
+                detail=safe_discovery_error(exc, str(token or "")),
+            ) from exc
+
     # 函数说明：按 issue id 返回本地已知详情和相关事件。
     @app.get("/api/v1/issues/{issue_id}")
     async def get_issue(issue_id: str) -> Dict[str, Any]:
@@ -186,6 +248,22 @@ def _payload_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(settings, dict):
         raise ValueError("settings 必须是对象")
     return settings
+
+
+# 函数说明：从 API payload 中读取必填值，供 discovery 接口复用。
+def _payload_present(payload: Dict[str, Any], name: str) -> Any:
+    value = payload.get(name)
+    if value is None:
+        raise ValueError(f"{name} 是必填项")
+    return value
+
+
+# 函数说明：从 API payload 中读取必填字符串，供 discovery 接口复用。
+def _payload_string(payload: Dict[str, Any], name: str) -> str:
+    value = _payload_present(payload, name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} 必须是非空字符串")
+    return value.strip()
 
 
 # 函数说明：运行 uvicorn server。

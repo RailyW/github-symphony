@@ -1,5 +1,14 @@
 import { apiBaseUrl } from "./api";
-import type { AppSettings, SettingsLoadResult, TokenStatus, TokenUpdate } from "./types";
+import type {
+  AppSettings,
+  GitHubDiscoveryConnectResult,
+  GitHubDiscoveryRequest,
+  GitHubProjectDiscoveryResult,
+  GitHubProjectOption,
+  SettingsLoadResult,
+  TokenStatus,
+  TokenUpdate,
+} from "./types";
 
 // 函数说明：创建浏览器调试模式可用的默认设置；Electron 运行时优先使用 preload IPC。
 export function defaultSettings(): AppSettings {
@@ -161,6 +170,52 @@ export async function readTokenStatus(): Promise<TokenStatus> {
     return window.symphonySettings.tokenStatus();
   }
   return { configured: false, encryptionAvailable: false };
+}
+
+// 函数说明：用临时 PAT 或已保存 token 测试 GitHub 连接并读取 owner 列表。
+export async function discoverConnect(
+  request: GitHubDiscoveryRequest,
+): Promise<GitHubDiscoveryConnectResult> {
+  if (window.symphonySettings) {
+    return window.symphonySettings.discoverConnect(request);
+  }
+  return requestJson<GitHubDiscoveryConnectResult>("/api/v1/settings/discovery/connect", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+// 函数说明：读取指定 owner 下的 GitHub Projects v2 列表。
+export async function discoverProjects(
+  request: GitHubDiscoveryRequest & { owner_type: "org" | "user"; owner: string },
+): Promise<{ projects: GitHubProjectOption[]; warnings: string[] }> {
+  if (window.symphonySettings) {
+    return window.symphonySettings.discoverProjects(request);
+  }
+  return requestJson<{ projects: GitHubProjectOption[]; warnings: string[] }>(
+    "/api/v1/settings/discovery/projects",
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+// 函数说明：读取 Project 字段、状态选项和 Project 中出现过的仓库。
+export async function discoverProject(
+  request: GitHubDiscoveryRequest & {
+    owner_type: "org" | "user";
+    owner: string;
+    project_number: number;
+  },
+): Promise<GitHubProjectDiscoveryResult> {
+  if (window.symphonySettings) {
+    return window.symphonySettings.discoverProject(request);
+  }
+  return requestJson<GitHubProjectDiscoveryResult>("/api/v1/settings/discovery/project", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
 }
 
 // 函数说明：封装 settings API 的 JSON 请求。

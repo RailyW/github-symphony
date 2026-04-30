@@ -20,6 +20,7 @@ from symphony_github.core.settings import (
 )
 from symphony_github.core.workflow import load_workflow
 from symphony_github.integrations.github.client import GitHubClient
+from symphony_github.integrations.github.discovery import GitHubDiscoveryService
 from symphony_github.integrations.github.dynamic_tools import GitHubDynamicTools
 from symphony_github.integrations.github.tracker import GitHubProjectsV2Tracker
 
@@ -355,6 +356,70 @@ class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.mutation_variables["optionId"], "done-id")
 
 
+class FakeDiscoveryClient(GitHubClient):
+    """用于 Settings 向导 discovery 测试的假 GitHub client。"""
+
+    # 函数说明：初始化假 client 并保存调用记录，便于断言分页和查询类型。
+    def __init__(self) -> None:
+        super().__init__(token="fake-token")
+        self.calls = []
+
+    # 函数说明：根据 discovery GraphQL query 名称返回对应假响应。
+    async def graphql(self, query: str, variables: Dict | None = None) -> Dict:
+        variables = variables or {}
+        self.calls.append((query, variables))
+        if "GithubSymphonyDiscoveryConnect" in query:
+            return _discovery_connect_payload()
+        if "GithubSymphonyDiscoveryProjects" in query:
+            return _discovery_projects_payload()
+        if "GithubSymphonyDiscoveryProjectFields" in query:
+            return _discovery_project_fields_payload()
+        if "GithubSymphonyDiscoveryProjectRepositories" in query:
+            return _discovery_project_repositories_payload()
+        raise AssertionError(f"unexpected discovery query: {query}")
+
+
+class GitHubDiscoveryTest(unittest.IsolatedAsyncioTestCase):
+    """验证 Settings PAT 向导的 GitHub 只读发现能力。"""
+
+    # 函数说明：测试 connect 能返回当前用户和组织 owner 选择项。
+    async def test_connect_returns_viewer_and_owner_options(self) -> None:
+        service = GitHubDiscoveryService(FakeDiscoveryClient())
+
+        result = await service.connect()
+
+        self.assertEqual(result["viewer"]["login"], "octo")
+        self.assertEqual(
+            [(owner["owner_type"], owner["login"]) for owner in result["owners"]],
+            [("user", "octo"), ("org", "acme")],
+        )
+
+    # 函数说明：测试 Project 列表 discovery 会归一化 number/title/owner 信息。
+    async def test_list_projects_returns_project_options(self) -> None:
+        service = GitHubDiscoveryService(FakeDiscoveryClient())
+
+        result = await service.list_projects("org", "acme")
+
+        self.assertEqual(result["projects"][0]["number"], 12)
+        self.assertEqual(result["projects"][0]["title"], "Roadmap")
+        self.assertEqual(result["projects"][0]["owner"], "acme")
+
+    # 函数说明：测试 Project 详情 discovery 会返回字段、状态选项和推断仓库。
+    async def test_inspect_project_returns_fields_and_repositories(self) -> None:
+        service = GitHubDiscoveryService(FakeDiscoveryClient())
+
+        result = await service.inspect_project("org", "acme", 12)
+
+        self.assertEqual(result["status_fields"][0]["name"], "Status")
+        self.assertEqual(
+            [option["name"] for option in result["status_fields"][0]["options"]],
+            ["Todo", "In Progress", "Done"],
+        )
+        self.assertIn("Priority", [field["name"] for field in result["priority_fields"]])
+        self.assertEqual(result["repositories"], ["acme/api", "acme/web"])
+        self.assertEqual(result["item_sample_count"], 3)
+
+
 class FakeTracker:
     """用于调度器测试的假 tracker。"""
 
@@ -685,6 +750,113 @@ def _project_items_payload() -> Dict:
                             },
                         ],
                     },
+                }
+            }
+        }
+    }
+
+
+# 函数说明：生成 Settings discovery connect GraphQL fake payload。
+def _discovery_connect_payload() -> Dict:
+    return {
+        "data": {
+            "viewer": {
+                "login": "octo",
+                "name": "Octo Cat",
+                "organizations": {
+                    "nodes": [
+                        {"login": "acme", "name": "Acme Inc."},
+                    ]
+                },
+            }
+        }
+    }
+
+
+# 函数说明：生成 Settings discovery Project 列表 GraphQL fake payload。
+def _discovery_projects_payload() -> Dict:
+    return {
+        "data": {
+            "organization": {
+                "projectsV2": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "id": "PVT_12",
+                            "number": 12,
+                            "title": "Roadmap",
+                            "closed": False,
+                            "updatedAt": "2026-04-01T00:00:00Z",
+                        }
+                    ],
+                }
+            }
+        }
+    }
+
+
+# 函数说明：生成 Settings discovery Project 字段 GraphQL fake payload。
+def _discovery_project_fields_payload() -> Dict:
+    return {
+        "data": {
+            "organization": {
+                "projectV2": {
+                    "id": "PVT_12",
+                    "title": "Roadmap",
+                    "number": 12,
+                    "fields": {
+                        "nodes": [
+                            {
+                                "id": "PVTSSF_status",
+                                "name": "Status",
+                                "dataType": "SINGLE_SELECT",
+                                "options": [
+                                    {"id": "todo-id", "name": "Todo", "color": "GRAY"},
+                                    {
+                                        "id": "progress-id",
+                                        "name": "In Progress",
+                                        "color": "BLUE",
+                                    },
+                                    {"id": "done-id", "name": "Done", "color": "GREEN"},
+                                ],
+                            },
+                            {
+                                "id": "PVTF_priority",
+                                "name": "Priority",
+                                "dataType": "NUMBER",
+                            },
+                        ]
+                    },
+                }
+            }
+        }
+    }
+
+
+# 函数说明：生成 Settings discovery Project 仓库推断 GraphQL fake payload。
+def _discovery_project_repositories_payload() -> Dict:
+    return {
+        "data": {
+            "organization": {
+                "projectV2": {
+                    "items": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [
+                            {
+                                "content": {
+                                    "__typename": "Issue",
+                                    "repository": {"nameWithOwner": "acme/web"},
+                                }
+                            },
+                            {
+                                "content": {
+                                    "__typename": "PullRequest",
+                                    "repository": {"nameWithOwner": "acme/api"},
+                                }
+                            },
+                            {"content": {"__typename": "DraftIssue"}},
+                        ],
+                    }
                 }
             }
         }
