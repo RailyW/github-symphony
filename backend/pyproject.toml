@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "symphony-github"
+version = "0.1.0"
+description = "GitHub Projects v2 orchestration service for Codex app-server."
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "GitHub Symphony Contributors" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "PyYAML>=6.0",
+  "Jinja2>=3.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6"
+]
+package = [
+  "pyinstaller>=6.0"
+]
+
+[project.scripts]
+symphony-github = "symphony_github.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

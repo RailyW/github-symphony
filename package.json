@@ -1,0 +1,9 @@
+{
+  "name": "github-symphony-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "backend:doctor": "python -m symphony_github doctor",
+    "desktop:dev": "npm --prefix desktop run dev"
+  }
+}
