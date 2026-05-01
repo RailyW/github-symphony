@@ -93,6 +93,18 @@ export type AppSettings = {
       mode: "read_only" | "read_write";
     };
   };
+  completion_policy: {
+    kind: "update_project_status" | "none";
+    success_state: string;
+    failure_state: string | null;
+    mark_done_after_successful_turn: boolean;
+    close_issue: boolean;
+  };
+  logging: {
+    level: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
+    retention_days: number;
+    max_file_mb: number;
+  };
   prompt_template: string;
 };
 
@@ -165,6 +177,45 @@ export type GitHubProjectDiscoveryResult = {
   warnings: string[];
 };
 
+export type LogConfig = {
+  log_dir: string;
+  level: string;
+  retention_days: number;
+  max_file_mb: number;
+  backend_log_file: string;
+};
+
+export type LogEntry = {
+  timestamp: string | null;
+  level: string;
+  logger: string;
+  event_type: string;
+  message: string;
+  issue_id?: string | null;
+  identifier?: string | null;
+  run_id?: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  settings_generation?: number | null;
+  payload?: Record<string, unknown>;
+  exception?: string | null;
+  _cursor?: number;
+  _source?: string;
+};
+
+export type LogQueryFilters = {
+  level?: string;
+  event_type?: string;
+  identifier?: string;
+  q?: string;
+  cursor?: number | null;
+};
+
+export type LogQueryResult = {
+  entries: LogEntry[];
+  next_cursor: number | null;
+};
+
 declare global {
   interface Window {
     symphony?: {
@@ -205,6 +256,12 @@ declare global {
           project_number: number;
         },
       ) => Promise<GitHubProjectDiscoveryResult>;
+    };
+    symphonyLogs?: {
+      config: () => Promise<LogConfig>;
+      query: (filters: LogQueryFilters) => Promise<LogQueryResult>;
+      exportBundle: () => Promise<{ path: string }>;
+      openDirectory: () => Promise<{ ok: boolean; error?: string }>;
     };
   }
 }

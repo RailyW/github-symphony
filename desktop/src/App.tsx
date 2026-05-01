@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileDown,
   FileUp,
+  FolderOpen,
   HelpCircle,
   LayoutDashboard,
   Play,
@@ -13,12 +14,22 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  ScrollText,
   Server,
   Settings,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { fetchState, refreshState, restartRun, stopRun } from "./api";
+import {
+  exportLogBundle,
+  fetchLogConfig,
+  fetchState,
+  openLogDirectory,
+  queryLogs,
+  refreshState,
+  restartRun,
+  stopRun,
+} from "./api";
 import {
   discoverConnect,
   discoverProject,
@@ -38,6 +49,9 @@ import type {
   GitHubProjectDiscoveryResult,
   GitHubProjectFieldOption,
   GitHubProjectOption,
+  LogConfig,
+  LogEntry,
+  LogQueryFilters,
   RunRecord,
   SettingsLoadResult,
   StateSnapshot,
@@ -46,8 +60,8 @@ import type {
   WorkItem,
 } from "./types";
 
-type PageKey = "dashboard" | "settings" | "help";
-type SettingsTab = "github" | "workspace" | "agent" | "codex" | "tools" | "prompt";
+type PageKey = "dashboard" | "settings" | "logs" | "help";
+type SettingsTab = "github" | "workspace" | "agent" | "completion" | "codex" | "tools" | "logging" | "prompt";
 
 // 函数说明：桌面仪表盘根组件，负责页面导航和共享状态加载。
 export function App(): JSX.Element {
@@ -144,6 +158,7 @@ export function App(): JSX.Element {
           />
         ) : null}
         {page === "settings" && !settings ? <EmptyState text="Loading settings" /> : null}
+        {page === "logs" ? <LogsPage onMessage={setStatusMessage} onError={setError} /> : null}
         {page === "help" ? <HelpPage /> : null}
       </section>
     </main>
@@ -175,6 +190,9 @@ function Sidebar({ page, onChange }: { page: PageKey; onChange: (page: PageKey) 
       </NavButton>
       <NavButton page={page} target="settings" icon={<Settings size={18} />} onChange={onChange}>
         Settings
+      </NavButton>
+      <NavButton page={page} target="logs" icon={<ScrollText size={18} />} onChange={onChange}>
+        Logs
       </NavButton>
       <NavButton page={page} target="help" icon={<HelpCircle size={18} />} onChange={onChange}>
         Help
@@ -214,6 +232,9 @@ function pageTitle(page: PageKey): string {
   if (page === "settings") {
     return "Settings";
   }
+  if (page === "logs") {
+    return "Logs";
+  }
   if (page === "help") {
     return "Help";
   }
@@ -224,6 +245,9 @@ function pageTitle(page: PageKey): string {
 function pageSubtitle(page: PageKey, state: StateSnapshot | null, settingsPath: string): string {
   if (page === "settings") {
     return settingsPath || "App settings";
+  }
+  if (page === "logs") {
+    return "持久诊断日志、过滤和脱敏诊断包";
   }
   if (page === "help") {
     return "面向 Codex CLI / Claude Code 用户的 GitHub agent 调度指南";
@@ -435,8 +459,10 @@ function SettingsPage({
           ) : null}
           {tab === "workspace" ? <WorkspaceSettings settings={settings} onChange={onSettingsChange} /> : null}
           {tab === "agent" ? <AgentSettings settings={settings} onChange={onSettingsChange} /> : null}
+          {tab === "completion" ? <CompletionSettings settings={settings} onChange={onSettingsChange} /> : null}
           {tab === "codex" ? <CodexSettings settings={settings} onChange={onSettingsChange} /> : null}
           {tab === "tools" ? <ToolSettings settings={settings} onChange={onSettingsChange} /> : null}
+          {tab === "logging" ? <LoggingSettings settings={settings} onChange={onSettingsChange} /> : null}
           {tab === "prompt" ? <PromptSettings settings={settings} onChange={onSettingsChange} /> : null}
         </div>
       </div>
@@ -450,8 +476,10 @@ function settingsTabs(): Array<{ key: SettingsTab; label: string }> {
     { key: "github", label: "GitHub Project" },
     { key: "workspace", label: "Workspace" },
     { key: "agent", label: "Agent" },
+    { key: "completion", label: "Completion" },
     { key: "codex", label: "Codex" },
     { key: "tools", label: "Tools" },
+    { key: "logging", label: "Logging" },
     { key: "prompt", label: "Prompt" },
   ];
 }
@@ -616,6 +644,12 @@ function GitHubSettings({
       const statusOptions = statusField.options.map((option) => option.name);
       const activeStates = chooseStates(statusOptions, ["Todo", "In Progress", "Rework"], "first");
       const terminalStates = chooseStates(statusOptions, ["Done", "Closed", "Cancelled"], "last");
+      const successState = terminalStates.includes(settings.completion_policy.success_state)
+        ? settings.completion_policy.success_state
+        : terminalStates.find((state) => state === "Done") || terminalStates[0] || "Done";
+      const failureState = statusOptions.includes(settings.completion_policy.failure_state || "")
+        ? settings.completion_policy.failure_state
+        : statusOptions.find((state) => state === "Rework") || activeStates[0] || null;
 
       setProjectDiscovery(result);
       updateSettings(onChange, settings, (draft) => {
@@ -626,6 +660,8 @@ function GitHubSettings({
         draft.tracker.priority_field = priorityField?.name || null;
         draft.tracker.active_states = activeStates;
         draft.tracker.terminal_states = terminalStates;
+        draft.completion_policy.success_state = successState;
+        draft.completion_policy.failure_state = failureState;
         if (result.repositories.length) {
           draft.tracker.repositories = result.repositories;
         }
@@ -898,6 +934,75 @@ function AgentSettings({
   );
 }
 
+// 函数说明：渲染任务完成策略设置区，控制成功 turn 后如何更新 GitHub Project 状态。
+function CompletionSettings({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}): JSX.Element {
+  const knownStates = Array.from(
+    new Set([
+      ...settings.tracker.terminal_states,
+      settings.completion_policy.success_state,
+      settings.completion_policy.failure_state || "Rework",
+    ].filter(Boolean)),
+  );
+
+  return (
+    <>
+      <SectionIntro
+        title="Completion"
+        text="Codex turn 正常完成后，App 会把 Project item 的 Status 更新到成功状态，让任务离开 active states，避免下一轮 poll 重复派发。"
+      />
+      <div className="formGrid">
+        <SelectField
+          label="Policy Kind"
+          value={settings.completion_policy.kind}
+          options={["update_project_status", "none"]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.completion_policy.kind = value as "update_project_status" | "none";
+          })}
+        />
+        <SelectField
+          label="Success State"
+          value={settings.completion_policy.success_state}
+          options={knownStates}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.completion_policy.success_state = value;
+          })}
+        />
+        <TextField
+          label="Failure State"
+          value={settings.completion_policy.failure_state || ""}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.completion_policy.failure_state = value || null;
+          })}
+        />
+        <ToggleField
+          label="Mark Done After Successful Turn"
+          checked={settings.completion_policy.mark_done_after_successful_turn}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.completion_policy.mark_done_after_successful_turn = value;
+          })}
+        />
+        <ToggleField
+          label="Close Issue"
+          checked={settings.completion_policy.close_issue}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.completion_policy.close_issue = value;
+          })}
+        />
+      </div>
+      <div className="inlineHint">
+        当前版本只自动更新 GitHub Project Status，不会自动关闭 Issue、merge PR、push 代码。
+        如果 Success State 不存在于 Project 的 Status 选项中，运行阶段会记录错误并进入重试。
+      </div>
+    </>
+  );
+}
+
 // 函数说明：渲染 Codex app-server 设置区。
 function CodexSettings({
   settings,
@@ -949,6 +1054,54 @@ function CodexSettings({
           draft.codex.turn_sandbox_policy = value;
         })}
       />
+    </>
+  );
+}
+
+// 函数说明：渲染持久诊断日志设置区。
+function LoggingSettings({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}): JSX.Element {
+  return (
+    <>
+      <SectionIntro
+        title="Logging"
+        text="后端、Electron main、Codex stderr、GitHub API 摘要和调度事件会写入本机 JSONL 日志，便于复现问题后直接导出诊断包。"
+      />
+      <div className="formGrid">
+        <SelectField
+          label="Level"
+          value={settings.logging.level}
+          options={["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.logging.level = value as AppSettings["logging"]["level"];
+          })}
+        />
+        <NumberField
+          label="Retention Days"
+          value={settings.logging.retention_days}
+          min={1}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.logging.retention_days = value;
+          })}
+        />
+        <NumberField
+          label="Max File MB"
+          value={settings.logging.max_file_mb}
+          min={1}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.logging.max_file_mb = value;
+          })}
+        />
+      </div>
+      <div className="inlineHint">
+        Electron 打包版日志默认位于 App 的 userData/logs；CLI 默认位于 ~/.github-symphony/logs。
+        Logs 页面可直接打开目录或导出脱敏 zip 诊断包。
+      </div>
     </>
   );
 }
@@ -1025,6 +1178,191 @@ function PromptSettings({
         <code>{"{{ issue.url }}"}</code>
       </div>
     </>
+  );
+}
+
+// 函数说明：渲染持久日志页面，支持过滤、打开目录和导出脱敏诊断包。
+function LogsPage({
+  onMessage,
+  onError,
+}: {
+  onMessage: (message: string | null) => void;
+  onError: (message: string | null) => void;
+}): JSX.Element {
+  const [config, setConfig] = useState<LogConfig | null>(null);
+  const [filters, setFilters] = useState<LogQueryFilters>({});
+  const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // 函数说明：读取第一页日志，过滤条件变化或用户点击 Refresh 时调用。
+  const loadFirstPage = useCallback(async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      const [nextConfig, result] = await Promise.all([
+        fetchLogConfig(),
+        queryLogs({ ...filters, cursor: null }),
+      ]);
+      setConfig(nextConfig);
+      setEntries(result.entries);
+      setNextCursor(result.next_cursor);
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }, [filters, onError]);
+
+  // 函数说明：读取下一页日志并追加到当前列表。
+  const loadMore = useCallback(async () => {
+    if (nextCursor == null) {
+      return;
+    }
+    setBusy(true);
+    onError(null);
+    try {
+      const result = await queryLogs({ ...filters, cursor: nextCursor });
+      setEntries((current) => [...current, ...result.entries]);
+      setNextCursor(result.next_cursor);
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }, [filters, nextCursor, onError]);
+
+  // 逻辑说明：首次进入 Logs 页面时自动读取一页日志。
+  useEffect(() => {
+    void loadFirstPage();
+  }, [loadFirstPage]);
+
+  // 函数说明：导出诊断包并把路径显示给用户。
+  const handleExport = useCallback(async () => {
+    setBusy(true);
+    onError(null);
+    onMessage(null);
+    try {
+      const result = await exportLogBundle();
+      onMessage(`诊断包已导出：${result.path}`);
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }, [onError, onMessage]);
+
+  // 函数说明：请求 Electron main 打开日志目录。
+  const handleOpenDirectory = useCallback(async () => {
+    const result = await openLogDirectory();
+    if (result.ok) {
+      onMessage("已打开日志目录。");
+    } else {
+      onError(result.error || "无法打开日志目录");
+    }
+  }, [onError, onMessage]);
+
+  return (
+    <section className="logsPage">
+      <Panel title="Log Storage" icon={<ScrollText size={17} aria-hidden="true" />}>
+        <div className="logConfigGrid">
+          <Metric label="Directory" value={config?.log_dir || "-"} />
+          <Metric label="Level" value={config?.level || "-"} />
+          <Metric label="Retention" value={config ? `${config.retention_days} days` : "-"} />
+          <Metric label="Max File" value={config ? `${config.max_file_mb} MB` : "-"} />
+        </div>
+        <div className="panelActions">
+          <button className="secondaryButton" type="button" onClick={handleOpenDirectory} disabled={busy}>
+            <FolderOpen size={15} aria-hidden="true" />
+            Open Directory
+          </button>
+          <button className="secondaryButton" type="button" onClick={handleExport} disabled={busy}>
+            <FileDown size={15} aria-hidden="true" />
+            Export Bundle
+          </button>
+        </div>
+      </Panel>
+
+      <Panel title="Filters" icon={<RefreshCw size={17} aria-hidden="true" />}>
+        <div className="logFilters">
+          <SelectField
+            label="Level"
+            value={filters.level || "all"}
+            options={["all", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]}
+            onChange={(value) => setFilters((current) => ({
+              ...current,
+              level: value === "all" ? undefined : value,
+            }))}
+          />
+          <TextField
+            label="Event Type"
+            value={filters.event_type || ""}
+            onChange={(value) => setFilters((current) => ({ ...current, event_type: value || undefined }))}
+          />
+          <TextField
+            label="Identifier"
+            value={filters.identifier || ""}
+            onChange={(value) => setFilters((current) => ({ ...current, identifier: value || undefined }))}
+          />
+          <TextField
+            label="Keyword"
+            value={filters.q || ""}
+            onChange={(value) => setFilters((current) => ({ ...current, q: value || undefined }))}
+          />
+          <button className="primaryButton alignEnd" type="button" onClick={() => void loadFirstPage()} disabled={busy}>
+            <RefreshCw size={15} aria-hidden="true" />
+            Refresh
+          </button>
+        </div>
+      </Panel>
+
+      <Panel title="Entries" icon={<AlertCircle size={17} aria-hidden="true" />}>
+        <LogEntryList entries={entries} />
+        {nextCursor != null ? (
+          <div className="panelActions">
+            <button className="secondaryButton" type="button" onClick={() => void loadMore()} disabled={busy}>
+              Load More
+            </button>
+          </div>
+        ) : null}
+      </Panel>
+    </section>
+  );
+}
+
+// 函数说明：渲染日志条目列表，错误堆栈和 payload 使用可折叠 details 避免页面过长。
+function LogEntryList({ entries }: { entries: LogEntry[] }): JSX.Element {
+  if (entries.length === 0) {
+    return <EmptyState text="No matching logs" />;
+  }
+
+  return (
+    <div className="logList">
+      {entries.map((entry) => (
+        <article className={`logEntry level${entry.level}`} key={`${entry._source}-${entry._cursor}`}>
+          <header>
+            <span className="logLevel">{entry.level}</span>
+            <span className="monoText">{entry.event_type}</span>
+            <time>{entry.timestamp ? formatTime(entry.timestamp) : "-"}</time>
+            <span className="logSource">{entry._source || entry.logger}</span>
+          </header>
+          <p>{entry.message}</p>
+          {entry.identifier ? <div className="inlineHint compactHint">{entry.identifier}</div> : null}
+          {entry.payload && Object.keys(entry.payload).length ? (
+            <details className="logDetails">
+              <summary>Payload</summary>
+              <pre>{JSON.stringify(entry.payload, null, 2)}</pre>
+            </details>
+          ) : null}
+          {entry.exception ? (
+            <details className="logDetails">
+              <summary>Exception</summary>
+              <pre>{entry.exception}</pre>
+            </details>
+          ) : null}
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -1105,6 +1443,8 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "GitHub Project 页会通过 PAT discovery 填充 owner、project number、Status 字段、状态和 repositories。",
         "Workspace root 可以使用 ~，每个任务会在 root 下创建独立目录。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
+        "Completion 默认会在成功 turn 后把 Project Status 更新为 Done，避免同一 Todo 被重复派发。",
+        "Logging 默认 DEBUG、保留 14 天，可在 Logs 页面查询和导出诊断包。",
         "Tools mode 为 read_only 时会拒绝 REST 写操作和 GraphQL mutation。",
       ],
     },
@@ -1130,6 +1470,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "Stop 只停止本地 run，不修改 GitHub 状态。",
         "Restart 会停止本地 run，并在任务仍可派发时重新启动。",
         "Recent Events 是本地内存事件流，用于排查调度和配置问题。",
+        "更完整的错误堆栈、Codex stderr、GitHub API 摘要和 Electron 启动信息在 Logs 页面查看。",
       ],
     },
     {

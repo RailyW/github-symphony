@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from symphony_github.core.diagnostics import log_diagnostic, redact_text
+
 
 class GitHubClientError(RuntimeError):
     """GitHub API 调用失败。"""
 
     # 函数说明：保留状态码和响应体，方便 tracker 决定是否降级。
-    def __init__(self, message: str, status: Optional[int] = None, body: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: Optional[int] = None,
+        body: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.body = body
@@ -30,7 +38,11 @@ class GitHubClient:
     graphql_url: str = "https://api.github.com/graphql"
 
     # 函数说明：异步执行 GraphQL 请求。
-    async def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def graphql(
+        self,
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         payload = {"query": query, "variables": variables or {}}
         response = await asyncio.to_thread(
             self._request_json,
@@ -70,6 +82,7 @@ class GitHubClient:
 
     # 函数说明：同步 HTTP JSON 请求，供 asyncio.to_thread 调用。
     def _request_json(self, method: str, url: str, body: Optional[Dict[str, Any]]) -> Any:
+        started = time.monotonic()
         data = None
         headers = {
             "Accept": "application/vnd.github+json",
@@ -85,24 +98,65 @@ class GitHubClient:
             headers["Content-Type"] = "application/json"
 
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        path = _url_path_for_log(url)
 
         try:
             with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - URL 已由配置和 allowlist 控制。
                 raw = response.read().decode("utf-8")
+                log_diagnostic(
+                    "github.api.request",
+                    "GitHub API 请求完成",
+                    {
+                        "method": method,
+                        "path": path,
+                        "status": getattr(response, "status", None),
+                        "duration_ms": int((time.monotonic() - started) * 1000),
+                    },
+                    level="DEBUG",
+                )
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
+            log_diagnostic(
+                "github.api.error",
+                "GitHub API 请求返回 HTTP 错误",
+                {
+                    "method": method,
+                    "path": path,
+                    "status": exc.code,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "body": raw[:1000],
+                },
+                level="ERROR",
+            )
             raise GitHubClientError(
                 f"GitHub API HTTP {exc.code}",
                 status=exc.code,
                 body=raw,
             ) from exc
         except urllib.error.URLError as exc:
+            log_diagnostic(
+                "github.api.error",
+                "GitHub API 网络错误",
+                {
+                    "method": method,
+                    "path": path,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "reason": str(exc.reason),
+                },
+                level="ERROR",
+            )
             raise GitHubClientError(f"GitHub API 网络错误：{exc.reason}") from exc
 
 
 # 函数说明：脱敏文本中的 token，避免日志或事件泄露凭据。
 def redact_token(text: str, token: Optional[str]) -> str:
     if not token:
-        return text
-    return text.replace(token, "***")
+        return redact_text(text)
+    return redact_text(text.replace(token, "***"))
+
+
+# 函数说明：为日志提取 URL path，不记录 query，避免将敏感查询参数写入日志。
+def _url_path_for_log(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.path or "/"

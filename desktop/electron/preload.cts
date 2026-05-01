@@ -31,3 +31,11 @@ contextBridge.exposeInMainWorld("symphonySettings", {
   discoverProjects: (request: unknown) => ipcRenderer.invoke("settings:discover-projects", request),
   discoverProject: (request: unknown) => ipcRenderer.invoke("settings:discover-project", request),
 });
+
+// 函数说明：暴露日志页需要的最小 IPC 能力；renderer 不能直接读写任意本地文件。
+contextBridge.exposeInMainWorld("symphonyLogs", {
+  config: () => ipcRenderer.invoke("logs:config"),
+  query: (filters: unknown) => ipcRenderer.invoke("logs:query", filters),
+  exportBundle: () => ipcRenderer.invoke("logs:export"),
+  openDirectory: () => ipcRenderer.invoke("logs:open-directory"),
+});

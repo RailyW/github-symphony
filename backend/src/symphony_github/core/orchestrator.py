@@ -233,18 +233,37 @@ class Orchestrator:
     # 函数说明：判断候选任务是否可派发。
     def _can_dispatch(self, item: WorkItem) -> bool:
         if item.state not in self.config.tracker.active_states:
+            self._record_dispatch_skip(item, "state_not_active")
             return False
         if item.state in self.config.tracker.terminal_states:
+            self._record_dispatch_skip(item, "state_terminal")
             return False
         if item.id in self.running or item.id in self._claimed:
+            self._record_dispatch_skip(item, "already_running_or_claimed")
             return False
         if len(self.running) + len(self._claimed) >= self.config.agent.max_concurrent_agents:
+            self._record_dispatch_skip(item, "concurrency_full")
             return False
         if _is_blocked_todo(item):
+            self._record_dispatch_skip(item, "blocked_by_dependency")
             return False
         if not self._retry_ready(item.id):
+            self._record_dispatch_skip(item, "retry_backoff_active")
             return False
         return True
+
+    # 函数说明：记录候选任务未派发原因，方便 Logs 页面解释“为什么没有启动 agent”。
+    def _record_dispatch_skip(self, item: WorkItem, reason: str) -> None:
+        self.events.append(
+            "orchestrator.dispatch_skipped",
+            "候选任务本轮未派发",
+            {
+                "issue_id": item.id,
+                "identifier": item.identifier,
+                "state": item.state,
+                "reason": reason,
+            },
+        )
 
     # 函数说明：派发任务并创建后台 asyncio task。
     def _dispatch(self, item: WorkItem) -> None:

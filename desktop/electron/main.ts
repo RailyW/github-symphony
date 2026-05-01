@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -12,6 +12,7 @@ let backendProcess: ChildProcessWithoutNullStreams | null = null;
 const externalApiBaseUrl = process.env.SYMPHONY_API_BASE_URL;
 const SETTINGS_FILE_NAME = "settings.json";
 const SECRETS_FILE_NAME = "secrets.json";
+const ELECTRON_LOG_FILE_NAME = "electron-main.jsonl";
 
 type TokenUpdate =
   | { mode: "unchanged" }
@@ -33,6 +34,84 @@ type DiscoveryRequest = {
 };
 
 let encryptionAvailableHint = true;
+
+// 函数说明：返回 Electron 和 Python 后端共享的持久日志目录。
+function logDirPath(): string {
+  return path.join(app.getPath("userData"), "logs");
+}
+
+// 函数说明：把 Electron main 进程事件写入 JSONL 文件，便于诊断白屏和后端启动问题。
+function writeElectronLog(
+  level: "DEBUG" | "INFO" | "WARNING" | "ERROR",
+  eventType: string,
+  message: string,
+  payload: Record<string, unknown> = {},
+): void {
+  try {
+    const directory = logDirPath();
+    fs.mkdirSync(directory, { recursive: true });
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      logger: "electron.main",
+      event_type: eventType,
+      message: redactSecretText(message),
+      payload: redactSecretData(payload),
+    };
+    fs.appendFileSync(
+      path.join(directory, ELECTRON_LOG_FILE_NAME),
+      `${JSON.stringify(entry)}\n`,
+      "utf-8",
+    );
+  } catch (caught) {
+    console.error(`[electron-log] ${caught instanceof Error ? caught.message : String(caught)}`);
+  }
+}
+
+// 函数说明：递归脱敏 Electron main 写入日志的 payload。
+function redactSecretData(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSecretData(item));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (isSecretKey(key)) {
+        result[key] = "***";
+      } else {
+        result[key] = redactSecretData(item);
+      }
+    }
+    return result;
+  }
+  if (typeof value === "string") {
+    return redactSecretText(value);
+  }
+  return value;
+}
+
+// 函数说明：判断字段名是否代表敏感值；精确处理 PAT，避免把 path 误判为 PAT。
+function isSecretKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return (
+    ["token", "secret", "authorization", "password", "pat", "api_token", "github_token"].includes(
+      normalized,
+    )
+    || normalized.endsWith("_token")
+    || normalized.endsWith("_secret")
+    || normalized.endsWith("_password")
+    || normalized.endsWith("_pat")
+  );
+}
+
+// 函数说明：脱敏文本中的 GitHub PAT 和 Authorization header。
+function redactSecretText(text: string): string {
+  return text
+    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "***")
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "***")
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***")
+    .replace(/(Authorization["']?\s*[:=]\s*["']?(?:Bearer\s+)?)[A-Za-z0-9._-]+/gi, "$1***");
+}
 
 // 函数说明：判断当前是否是 Vite 开发模式。
 function isDevelopment(): boolean {
@@ -129,6 +208,18 @@ function defaultSettings(): Record<string, unknown> {
         mode: "read_write",
       },
     },
+    completion_policy: {
+      kind: "update_project_status",
+      success_state: "Done",
+      failure_state: "Rework",
+      mark_done_after_successful_turn: true,
+      close_issue: false,
+    },
+    logging: {
+      level: "DEBUG",
+      retention_days: 14,
+      max_file_mb: 10,
+    },
     prompt_template: promptTemplate,
   };
 }
@@ -222,7 +313,38 @@ async function loadSettingsDocument(): Promise<Record<string, unknown>> {
     await writeJsonFile(filePath, initial);
     return initial;
   }
-  return readJsonFile<Record<string, unknown>>(filePath, defaultSettings());
+  const stored = await readJsonFile<Record<string, unknown>>(filePath, defaultSettings());
+  return mergeSettingsWithDefaults(stored);
+}
+
+// 函数说明：把旧版本 settings 与当前默认结构深度合并，避免新增字段导致旧安装 UI 崩溃。
+function mergeSettingsWithDefaults(stored: Record<string, unknown>): Record<string, unknown> {
+  return deepMerge(defaultSettings(), stored);
+}
+
+// 函数说明：递归合并对象；数组和标量以用户已保存值为准。
+function deepMerge(
+  defaults: Record<string, unknown>,
+  stored: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...defaults };
+  for (const [key, value] of Object.entries(stored)) {
+    const defaultValue = result[key];
+    if (isPlainObject(defaultValue) && isPlainObject(value)) {
+      result[key] = deepMerge(
+        defaultValue as Record<string, unknown>,
+        value as Record<string, unknown>,
+      );
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+// 函数说明：判断值是否为普通对象，供 settings 深度合并使用。
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 // 函数说明：读取 secret 状态，不向 renderer 返回真实 token。
@@ -244,7 +366,14 @@ async function readGithubToken(): Promise<string> {
     return "";
   }
   const encrypted = Buffer.from(secrets.githubToken, "base64");
-  return safeStorage.decryptString(encrypted);
+  try {
+    return safeStorage.decryptString(encrypted);
+  } catch (caught) {
+    writeElectronLog("ERROR", "electron.secret_decrypt_failed", "GitHub token 解密失败", {
+      error: caught instanceof Error ? caught.message : String(caught),
+    });
+    throw caught;
+  }
 }
 
 // 函数说明：按 tokenUpdate 语义更新加密 token，避免普通保存误清 secret。
@@ -282,9 +411,19 @@ async function backendJson<T>(route: string, init?: RequestInit): Promise<T> {
     },
   });
   const text = await response.text();
-  const parsed = text ? JSON.parse(text) : {};
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = {};
+  }
   if (!response.ok) {
-    throw new Error(parsed.detail || text || `HTTP ${response.status}`);
+    writeElectronLog("ERROR", "electron.backend_json_failed", "后端 API 请求失败", {
+      route,
+      status: response.status,
+      body: text.slice(0, 1000),
+    });
+    throw new Error(String(parsed.detail || text || `HTTP ${response.status}`));
   }
   return parsed as T;
 }
@@ -360,8 +499,13 @@ async function bootstrapSettings(): Promise<void> {
   try {
     const settings = await loadSettingsDocument();
     await applySettingsToBackend(settings);
+    writeElectronLog("INFO", "electron.settings_bootstrap_applied", "启动设置已热应用到后端");
   } catch (caught) {
-    console.error(`[settings] ${caught instanceof Error ? caught.message : String(caught)}`);
+    const message = caught instanceof Error ? caught.message : String(caught);
+    writeElectronLog("ERROR", "electron.settings_bootstrap_failed", "启动设置热应用失败", {
+      error: message,
+    });
+    console.error(`[settings] ${message}`);
   }
 }
 
@@ -449,9 +593,44 @@ function registerSettingsIpc(): void {
   });
 }
 
+// 函数说明：注册日志页需要的 IPC；renderer 仍只访问受限能力，不直接操作任意文件。
+function registerLogsIpc(): void {
+  ipcMain.handle("logs:config", async () => backendJson("/api/v1/logs/config"));
+
+  ipcMain.handle("logs:query", async (_event, filters: Record<string, unknown> = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value == null || value === "") {
+        continue;
+      }
+      params.set(key, String(value));
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return backendJson(`/api/v1/logs/query${suffix}`);
+  });
+
+  ipcMain.handle("logs:export", async () => backendJson("/api/v1/logs/export", { method: "POST" }));
+
+  ipcMain.handle("logs:open-directory", async () => {
+    await fsp.mkdir(logDirPath(), { recursive: true });
+    const error = await shell.openPath(logDirPath());
+    if (error) {
+      writeElectronLog("ERROR", "electron.logs_open_failed", "打开日志目录失败", { error });
+      return { ok: false, error };
+    }
+    writeElectronLog("INFO", "electron.logs_opened", "用户打开了日志目录", {
+      log_dir: logDirPath(),
+    });
+    return { ok: true };
+  });
+}
+
 // 函数说明：启动 Python 后端进程；如果用户提供外部 API 地址则不重复启动。
 function startBackend(): void {
   if (externalApiBaseUrl) {
+    writeElectronLog("INFO", "electron.backend_external", "使用外部后端 API，不启动 sidecar", {
+      api_base_url: externalApiBaseUrl,
+    });
     return;
   }
 
@@ -485,7 +664,17 @@ function startBackend(): void {
     ...process.env,
     PYTHONPATH: [backendSource, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     PATH: buildAugmentedPath(process.env.PATH),
+    SYMPHONY_LOG_DIR: logDirPath(),
+    SYMPHONY_LOG_LEVEL: "DEBUG",
   };
+
+  writeElectronLog("INFO", "electron.backend_starting", "准备启动 Python 后端", {
+    command: backendCommand,
+    args: backendArgs,
+    cwd: projectRoot,
+    path: env.PATH,
+    log_dir: env.SYMPHONY_LOG_DIR,
+  });
 
   backendProcess = spawn(
     backendCommand,
@@ -499,12 +688,24 @@ function startBackend(): void {
 
   // 逻辑说明：后端日志保留在 Electron 控制台，便于开发模式排查启动失败。
   backendProcess.stdout.on("data", (chunk) => {
-    console.log(`[backend] ${chunk.toString().trimEnd()}`);
+    const line = chunk.toString().trimEnd();
+    writeElectronLog("DEBUG", "electron.backend_stdout", "后端 stdout", { line });
+    console.log(`[backend] ${line}`);
   });
   backendProcess.stderr.on("data", (chunk) => {
-    console.error(`[backend] ${chunk.toString().trimEnd()}`);
+    const line = chunk.toString().trimEnd();
+    writeElectronLog("WARNING", "electron.backend_stderr", "后端 stderr", { line });
+    console.error(`[backend] ${line}`);
+  });
+  backendProcess.on("error", (caught) => {
+    writeElectronLog("ERROR", "electron.backend_spawn_error", "后端进程启动失败", {
+      error: caught.message,
+    });
   });
   backendProcess.on("exit", (code) => {
+    writeElectronLog("INFO", "electron.backend_exited", "后端进程已退出", {
+      code: code ?? "unknown",
+    });
     console.log(`[backend] exited with code ${code ?? "unknown"}`);
     backendProcess = null;
   });
@@ -537,7 +738,13 @@ function createWindow(): void {
 // 函数说明：应用启动时先启动后端，再创建窗口。
 app.whenReady().then(() => {
   process.env.SYMPHONY_API_BASE_URL = externalApiBaseUrl || apiBaseUrl();
+  writeElectronLog("INFO", "electron.app_ready", "Electron App 已启动", {
+    packaged: app.isPackaged,
+    api_base_url: process.env.SYMPHONY_API_BASE_URL,
+    user_data: app.getPath("userData"),
+  });
   registerSettingsIpc();
+  registerLogsIpc();
   startBackend();
   void bootstrapSettings();
   createWindow();
@@ -559,6 +766,7 @@ app.on("window-all-closed", () => {
 // 函数说明：应用退出前停止后端子进程。
 app.on("before-quit", () => {
   if (backendProcess && !backendProcess.killed) {
+    writeElectronLog("INFO", "electron.backend_kill", "App 退出前停止后端进程");
     backendProcess.kill();
   }
 });

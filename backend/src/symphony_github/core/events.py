@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from .diagnostics import inferred_level_for_event, log_diagnostic, redact_data
 from .models import EventRecord
 
 
@@ -24,14 +25,21 @@ class EventStore:
         payload: Optional[Dict[str, Any]] = None,
     ) -> EventRecord:
         # 逻辑说明：payload 默认使用新字典，避免多个事件共享可变对象。
+        safe_payload = redact_data(payload or {})
         event = EventRecord(
             cursor=self._next_cursor,
             event_type=event_type,
             message=message,
-            payload=payload or {},
+            payload=safe_payload,
         )
         self._events.append(event)
         self._next_cursor += 1
+        log_diagnostic(
+            event_type,
+            message,
+            payload={**safe_payload, "event_cursor": event.cursor},
+            level=inferred_level_for_event(event_type, safe_payload),
+        )
         return event
 
     # 函数说明：读取最近事件，默认返回所有仍保存在队列中的事件。

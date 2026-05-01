@@ -23,6 +23,10 @@ class TrackerProtocol(Protocol):
     async def fetch_issue_states_by_ids(self, issue_ids: list) -> Dict[str, WorkItem]:
         ...
 
+    # 函数说明：把 Project v2 item 的 Status 更新到指定状态。
+    async def update_project_status(self, project_item_id: str, state_name: str) -> Dict[str, Any]:
+        ...
+
 
 @dataclass
 class RunnerResult:
@@ -83,6 +87,27 @@ class AgentRunner:
                     run_record.turn_id = result.turn_id
                     run_record.touch()
 
+                    if _turn_state_is_failure(result.final_state):
+                        message = f"Codex turn 结束状态异常：{result.final_state}"
+                        run_record.state = "failed"
+                        run_record.last_error = message
+                        run_record.touch()
+                        self.events.append(
+                            "runner.turn_failed",
+                            "Codex turn 未正常完成",
+                            {
+                                "identifier": item.identifier,
+                                "thread_id": result.thread_id,
+                                "turn_id": result.turn_id,
+                                "final_state": result.final_state,
+                            },
+                        )
+                        return RunnerResult(should_continue=True, error=message)
+
+                    completion_error = await self._apply_success_completion_policy(item, run_record)
+                    if completion_error is not None:
+                        return RunnerResult(should_continue=True, error=completion_error)
+
                     refreshed = await self.tracker.fetch_issue_states_by_ids([item.id])
                     latest = refreshed.get(item.id)
 
@@ -110,6 +135,50 @@ class AgentRunner:
             )
             return RunnerResult(should_continue=True, error=str(exc))
 
+    # 函数说明：根据 completion_policy 在成功 turn 后自动更新 GitHub Project 状态。
+    async def _apply_success_completion_policy(
+        self,
+        item: WorkItem,
+        run_record: RunRecord,
+    ) -> Optional[str]:
+        policy = self.config.completion_policy
+        if not policy.mark_done_after_successful_turn or policy.kind == "none":
+            return None
+
+        try:
+            # 逻辑说明：只更新 Project item Status，不关闭 Issue、不 merge PR、不 push 代码。
+            # 这样能让成功任务离开 active states，从源头阻止下一轮 poll 重复派发。
+            await self.tracker.update_project_status(item.project_item_id, policy.success_state)
+        except Exception as exc:  # noqa: BLE001 - 完成状态更新失败必须转成可重试 runner 结果。
+            message = str(exc)
+            run_record.state = "failed"
+            run_record.last_error = message
+            run_record.touch()
+            self.events.append(
+                "orchestrator.completion_status_update_failed",
+                "Codex turn 成功，但更新 GitHub Project 完成状态失败",
+                {
+                    "issue_id": item.id,
+                    "identifier": item.identifier,
+                    "project_item_id": item.project_item_id,
+                    "target_state": policy.success_state,
+                    "error": message,
+                },
+            )
+            return message
+
+        self.events.append(
+            "orchestrator.completion_status_updated",
+            "Codex turn 成功，已更新 GitHub Project 完成状态",
+            {
+                "issue_id": item.id,
+                "identifier": item.identifier,
+                "project_item_id": item.project_item_id,
+                "target_state": policy.success_state,
+            },
+        )
+        return None
+
     # 函数说明：按配置创建 Codex app-server client。
     def _build_codex_client(self, workspace: str) -> CodexAppServerClient:
         specs = self.github_tools.tool_specs() if self.github_tools is not None else []
@@ -130,3 +199,10 @@ class AgentRunner:
             dynamic_tool_specs=specs,
             dynamic_tool_executor=execute_tool,
         )
+
+
+# 函数说明：判断 Codex turn final_state 是否表示失败或取消，避免把失败 turn 标记为 Done。
+def _turn_state_is_failure(final_state: Optional[str]) -> bool:
+    if final_state is None:
+        return False
+    return final_state.lower() in {"failed", "failure", "error", "cancelled", "canceled"}

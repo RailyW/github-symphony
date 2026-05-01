@@ -99,6 +99,26 @@ class ToolsConfig:
 
 
 @dataclass
+class CompletionPolicyConfig:
+    """Codex turn 成功后的本地完成策略配置。"""
+
+    kind: str = "update_project_status"
+    success_state: str = "Done"
+    failure_state: Optional[str] = "Rework"
+    mark_done_after_successful_turn: bool = True
+    close_issue: bool = False
+
+
+@dataclass
+class LoggingConfig:
+    """持久诊断日志配置。"""
+
+    level: str = "DEBUG"
+    retention_days: int = 14
+    max_file_mb: int = 10
+
+
+@dataclass
 class SymphonyConfig:
     """完整运行配置。"""
 
@@ -108,6 +128,8 @@ class SymphonyConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    completion_policy: CompletionPolicyConfig = field(default_factory=CompletionPolicyConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     workflow_path: Optional[str] = None
 
 
@@ -121,9 +143,13 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
         kind=_expect_string(tracker_raw.get("kind"), "tracker.kind"),
         owner_type=_expect_string(tracker_raw.get("owner_type", "org"), "tracker.owner_type"),
         owner=_expect_string(tracker_raw.get("owner"), "tracker.owner"),
-        project_number=int(_expect_present(tracker_raw.get("project_number"), "tracker.project_number")),
+        project_number=int(
+            _expect_present(tracker_raw.get("project_number"), "tracker.project_number")
+        ),
         repositories=_string_list(tracker_raw.get("repositories"), "tracker.repositories"),
-        api_token=_expand_optional_secret(tracker_raw.get("api_token") or os.environ.get("GITHUB_TOKEN")),
+        api_token=_expand_optional_secret(
+            tracker_raw.get("api_token") or os.environ.get("GITHUB_TOKEN")
+        ),
         status_field=str(tracker_raw.get("status_field") or "Status"),
         active_states=_string_list(
             tracker_raw.get("active_states", ["Todo", "In Progress"]),
@@ -144,6 +170,10 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
     agent = _build_agent(raw.get("agent"))
     codex = _build_codex(raw.get("codex"))
     tools = _build_tools(raw.get("tools"))
+    completion_policy = _build_completion_policy(raw.get("completion_policy"))
+    _validate_completion_policy(completion_policy, tracker)
+    logging = _build_logging(raw.get("logging"))
+    _validate_logging_level(logging.level)
 
     return SymphonyConfig(
         tracker=tracker,
@@ -152,6 +182,8 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
         agent=agent,
         codex=codex,
         tools=tools,
+        completion_policy=completion_policy,
+        logging=logging,
         workflow_path=workflow_path,
     )
 
@@ -220,6 +252,31 @@ def _build_tools(raw: Any) -> ToolsConfig:
     )
 
 
+# 函数说明：构建 Codex turn 成功后的 Project 完成策略。
+def _build_completion_policy(raw: Any) -> CompletionPolicyConfig:
+    mapping = raw if isinstance(raw, dict) else {}
+    return CompletionPolicyConfig(
+        kind=str(mapping.get("kind") or "update_project_status"),
+        success_state=str(mapping.get("success_state") or "Done").strip(),
+        failure_state=_optional_string(mapping.get("failure_state", "Rework")),
+        mark_done_after_successful_turn=bool(
+            mapping.get("mark_done_after_successful_turn", True)
+        ),
+        close_issue=bool(mapping.get("close_issue", False)),
+    )
+
+
+# 函数说明：构建持久日志策略，并把日志级别规整为 Python logging 识别的大写形式。
+def _build_logging(raw: Any) -> LoggingConfig:
+    mapping = raw if isinstance(raw, dict) else {}
+    level = str(mapping.get("level") or "DEBUG").upper()
+    return LoggingConfig(
+        level=level,
+        retention_days=max(1, int(mapping.get("retention_days", 14))),
+        max_file_mb=max(1, int(mapping.get("max_file_mb", 10))),
+    )
+
+
 # 函数说明：校验 tracker 的枚举和必要字段。
 def _validate_tracker(tracker: TrackerConfig) -> None:
     if tracker.kind != "github_projects_v2":
@@ -240,6 +297,36 @@ def _validate_tracker(tracker: TrackerConfig) -> None:
 
     if not tracker.terminal_states:
         raise ValueError("tracker.terminal_states 不能为空")
+
+
+# 函数说明：校验完成策略，避免成功状态仍在 active states 中导致重复派发。
+def _validate_completion_policy(
+    policy: CompletionPolicyConfig,
+    tracker: TrackerConfig,
+) -> None:
+    if policy.kind not in {"update_project_status", "none"}:
+        raise ValueError("completion_policy.kind 目前只支持 update_project_status 或 none")
+
+    if not policy.success_state:
+        raise ValueError("completion_policy.success_state 不能为空")
+
+    # 逻辑说明：自动完成的目标状态必须脱离 active states，否则成功 turn 后仍会被调度器再次派发。
+    if policy.mark_done_after_successful_turn and policy.success_state in tracker.active_states:
+        raise ValueError("completion_policy.success_state 不能同时出现在 tracker.active_states")
+
+    # 逻辑说明：终态集合是调度器和用户理解“已完成”的共同边界，默认要求成功状态属于终态。
+    if (
+        policy.mark_done_after_successful_turn
+        and policy.kind == "update_project_status"
+        and policy.success_state not in tracker.terminal_states
+    ):
+        raise ValueError("completion_policy.success_state 必须包含在 tracker.terminal_states")
+
+
+# 函数说明：校验日志级别，防止拼写错误导致日志静默。
+def _validate_logging_level(level: str) -> None:
+    if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("logging.level 必须是 DEBUG、INFO、WARNING、ERROR 或 CRITICAL")
 
 
 # 函数说明：要求某个配置块是字典。

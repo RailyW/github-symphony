@@ -5,6 +5,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, Optional
 
+from symphony_github.core.diagnostics import (
+    configure_diagnostics,
+    current_diagnostics_config,
+    export_diagnostics_bundle,
+    query_logs,
+)
+from symphony_github.core.models import dataclass_to_dict
 from symphony_github.core.orchestrator import Orchestrator
 from symphony_github.core.runtime import build_runtime_components
 from symphony_github.core.settings import (
@@ -77,6 +84,11 @@ def create_app(orchestrator: Orchestrator):
                     "GitHub token 未配置：请在 Settings / GitHub Project 保存 PAT，"
                     "或设置 GITHUB_TOKEN 后重新应用。"
                 )
+            configure_diagnostics(
+                level=document.config.logging.level,
+                retention_days=document.config.logging.retention_days,
+                max_file_mb=document.config.logging.max_file_mb,
+            )
             runtime = build_runtime_components(
                 document.config,
                 document.prompt_template,
@@ -225,6 +237,37 @@ def create_app(orchestrator: Orchestrator):
         records = orchestrator.events.since(cursor)
         next_cursor = records[-1].cursor if records else cursor
         return {"events": [record.to_dict() for record in records], "next_cursor": next_cursor}
+
+    # 函数说明：返回当前持久日志配置和实际落盘目录。
+    @app.get("/api/v1/logs/config")
+    async def logs_config() -> Dict[str, Any]:
+        return dataclass_to_dict(current_diagnostics_config())
+
+    # 函数说明：分页查询结构化 JSONL 日志，供 Logs 页面筛选诊断。
+    @app.get("/api/v1/logs/query")
+    async def logs_query(
+        level: Optional[str] = None,
+        event_type: Optional[str] = None,
+        identifier: Optional[str] = None,
+        q: Optional[str] = None,
+        cursor: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return query_logs(
+            level=level or None,
+            event_type=event_type or None,
+            identifier=identifier or None,
+            q=q or None,
+            cursor=cursor,
+        )
+
+    # 函数说明：导出脱敏诊断包，包含日志、当前状态和配置摘要。
+    @app.post("/api/v1/logs/export")
+    async def logs_export() -> Dict[str, str]:
+        path = export_diagnostics_bundle(
+            state=orchestrator.snapshot().to_dict(),
+            settings_summary=dataclass_to_dict(orchestrator.config),
+        )
+        return {"path": path}
 
     # 函数说明：应用启动时创建调度器后台任务。
     @app.on_event("startup")

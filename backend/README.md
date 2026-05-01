@@ -4,7 +4,7 @@
 
 ## 模块边界
 
-- `symphony_github.core`：配置、工作流文件、调度、事件、工作区和 prompt 渲染。
+- `symphony_github.core`：配置、工作流文件、调度、事件、持久诊断日志、工作区和 prompt 渲染。
 - `symphony_github.integrations.github`：GitHub GraphQL/REST client、Projects v2 tracker、Issue dependencies 和动态工具。
 - `symphony_github.codex`：Codex app-server JSON-RPC stdio client。
 - `symphony_github.api`：FastAPI 本地 HTTP API。
@@ -14,7 +14,7 @@
 ```bash
 python -m pip install -e ".[dev]"
 symphony-github doctor
-symphony-github run ../WORKFLOW.example.md --host 127.0.0.1 --port 8765
+symphony-github run ../WORKFLOW.example.md --host 127.0.0.1 --port 8765 --log-level debug
 ```
 
 基础单元测试不依赖第三方包：
@@ -25,6 +25,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 
 ## 设计约束
 
-- GitHub token 只在内存中使用，不写入日志或事件。
-- 调度器默认不写 GitHub 状态；写能力只通过显式配置的动态工具暴露给 Codex agent。
+- GitHub token 只在内存中使用，不写入日志、事件或诊断包。
+- 调度器默认在 Codex turn 成功后按照 `completion_policy` 更新 GitHub Project item 的 `Status`，但不自动关闭 Issue、不 merge、不 push。
+- GitHub 写能力仍受 PAT 权限、动态工具模式和配置 allowlist 约束。
+- CLI 日志默认写入 `~/.github-symphony/logs`；Electron 打包版通过 `SYMPHONY_LOG_DIR` 写入 `<userData>/logs`。
 - 后端只监听 `127.0.0.1`，避免把本地控制面暴露到网络。

@@ -11,7 +11,6 @@ from symphony_github.core.models import WorkItem
 
 from .client import GitHubClient, GitHubClientError
 
-
 PROJECT_PAGE_SIZE = 50
 
 
@@ -44,13 +43,26 @@ class GitHubProjectsV2Tracker:
 
     # 函数说明：读取 active states 内的候选任务。
     async def fetch_candidate_issues(self) -> List[WorkItem]:
+        self._debug(
+            "读取 active states 内的 GitHub Project 候选任务",
+            {"states": list(self.config.active_states)},
+        )
         return await self.fetch_issues_by_states(self.config.active_states)
 
     # 函数说明：读取指定 Project Status 状态集合下的任务。
     async def fetch_issues_by_states(self, state_names: Sequence[str]) -> List[WorkItem]:
         items = await self._fetch_project_items()
         allowed = set(state_names)
-        return [item for item in items if item.state in allowed]
+        filtered = [item for item in items if item.state in allowed]
+        self._debug(
+            "GitHub Project 状态过滤完成",
+            {
+                "states": list(state_names),
+                "total_items": len(items),
+                "matched_items": len(filtered),
+            },
+        )
+        return filtered
 
     # 函数说明：刷新指定任务 ID 的状态；为了简单可靠，v1 通过重新读取 project items 完成。
     async def fetch_issue_states_by_ids(self, issue_ids: Iterable[str]) -> Dict[str, WorkItem]:
@@ -71,7 +83,12 @@ class GitHubProjectsV2Tracker:
             "fieldId": field_cache.status_field_id,
             "optionId": option_id,
         }
-        return await self.client.graphql(UPDATE_PROJECT_STATUS_MUTATION, variables)
+        result = await self.client.graphql(UPDATE_PROJECT_STATUS_MUTATION, variables)
+        self._debug(
+            "GitHub Project item Status 已更新",
+            {"project_item_id": project_item_id, "state": state_name},
+        )
+        return result
 
     # 函数说明：读取并归一化 Project v2 全部 item，内部处理分页。
     async def _fetch_project_items(self) -> List[WorkItem]:
@@ -209,6 +226,11 @@ class GitHubProjectsV2Tracker:
     def _warn(self, message: str, payload: Dict[str, Any]) -> None:
         if self.events is not None:
             self.events.append("github.warning", message, payload)
+
+    # 函数说明：向事件流写入调试级 GitHub tracker 摘要，便于 Logs 页面追踪调度决策。
+    def _debug(self, message: str, payload: Dict[str, Any]) -> None:
+        if self.events is not None:
+            self.events.append("github.debug", message, payload)
 
 
 # 函数说明：根据 owner_type 返回 Project fields 查询。

@@ -5,15 +5,22 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from typing import Dict, List
 
 from symphony_github.codex.app_server import build_codex_path
 from symphony_github.core.config import build_config
+from symphony_github.core.diagnostics import (
+    configure_diagnostics,
+    export_diagnostics_bundle,
+    query_logs,
+)
 from symphony_github.core.events import EventStore
 from symphony_github.core.models import RunRecord, WorkItem
 from symphony_github.core.orchestrator import Orchestrator
 from symphony_github.core.prompt import PromptRenderError, render_prompt
+from symphony_github.core.runner import AgentRunner
 from symphony_github.core.settings import (
     export_workflow_text,
     import_workflow_text,
@@ -217,6 +224,8 @@ Prompt body
         self.assertEqual(document.config.tracker.owner_type, "user")
         self.assertEqual(document.config.tracker.api_token, "token")
         self.assertEqual(document.config.agent.max_concurrent_agents, 3)
+        self.assertEqual(document.config.completion_policy.success_state, "Done")
+        self.assertEqual(document.config.logging.level, "DEBUG")
 
     # 函数说明：测试 REST 工具拒绝配置仓库之外的路径。
     async def test_rest_path_must_be_allowlisted(self) -> None:
@@ -441,6 +450,8 @@ class FakeTracker:
     # 函数说明：保存候选任务列表。
     def __init__(self, items: List[WorkItem]) -> None:
         self.items = items
+        self.status_updates = []
+        self.fail_status_update = False
 
     # 函数说明：返回候选任务。
     async def fetch_candidate_issues(self) -> List[WorkItem]:
@@ -454,6 +465,16 @@ class FakeTracker:
     async def fetch_issue_states_by_ids(self, issue_ids: List[str]) -> Dict[str, WorkItem]:
         wanted = set(issue_ids)
         return {item.id: item for item in self.items if item.id in wanted}
+
+    # 函数说明：模拟 Project Status 更新；默认直接修改内存 WorkItem 状态。
+    async def update_project_status(self, project_item_id: str, state_name: str) -> Dict:
+        self.status_updates.append((project_item_id, state_name))
+        if self.fail_status_update:
+            raise RuntimeError("status update failed")
+        for item in self.items:
+            if item.project_item_id == project_item_id:
+                item.state = state_name
+        return {"ok": True}
 
 
 class FailingTracker(FakeTracker):
@@ -480,6 +501,153 @@ class FakeRunner:
             should_continue = False
 
         return Result()
+
+
+class FakeCodexTurnResult:
+    """用于 AgentRunner 测试的假 Codex turn 结果。"""
+
+    thread_id = "thread-1"
+    turn_id = "turn-1"
+    completed = True
+    final_state = "completed"
+
+
+class FakeCodexClient:
+    """用于 AgentRunner 测试的假 Codex app-server client。"""
+
+    # 函数说明：初始化调用记录，便于断言 runner 确实发起了一次 turn。
+    def __init__(self) -> None:
+        self.prompts: List[str] = []
+        self.closed = False
+
+    # 函数说明：模拟一次成功 Codex turn。
+    async def run_turn(self, prompt: str) -> FakeCodexTurnResult:
+        self.prompts.append(prompt)
+        return FakeCodexTurnResult()
+
+    # 函数说明：记录 close 调用，验证 runner 不泄漏 app-server client。
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeAgentRunnerWithCodex(AgentRunner):
+    """允许测试替换 Codex client 的 AgentRunner。"""
+
+    # 函数说明：保存 fake Codex client，避免单元测试启动真实 codex app-server。
+    def __init__(self, *args, fake_codex: FakeCodexClient, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.fake_codex = fake_codex
+
+    # 函数说明：返回测试提供的 fake Codex client。
+    def _build_codex_client(self, workspace: str) -> FakeCodexClient:
+        return self.fake_codex
+
+
+class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
+    """验证成功 turn 后的 Project Status 完成策略。"""
+
+    # 函数说明：测试成功 turn 会把 Project item 状态更新到 Done，并停止 continuation。
+    async def test_successful_turn_marks_project_item_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "api_token": "fake-token",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": tmp},
+                    "completion_policy": {
+                        "kind": "update_project_status",
+                        "success_state": "Done",
+                        "mark_done_after_successful_turn": True,
+                    },
+                }
+            )
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            tracker = FakeTracker([item])
+            events = EventStore()
+            fake_codex = FakeCodexClient()
+            runner = FakeAgentRunnerWithCodex(
+                config=config,
+                prompt_template="{{ issue.identifier }}",
+                tracker=tracker,
+                events=events,
+                fake_codex=fake_codex,
+            )
+            run_record = RunRecord(
+                issue_id=item.id,
+                identifier=item.identifier,
+                state="running",
+                workspace="",
+            )
+
+            result = await runner.run(item, run_record)
+
+            self.assertFalse(result.should_continue)
+            self.assertEqual(item.state, "Done")
+            self.assertEqual(tracker.status_updates, [(item.project_item_id, "Done")])
+            self.assertEqual(run_record.thread_id, "thread-1")
+            self.assertTrue(fake_codex.closed)
+            self.assertTrue(
+                any(
+                    event.event_type == "orchestrator.completion_status_updated"
+                    for event in events.recent()
+                )
+            )
+
+    # 函数说明：测试 Project Status 更新失败会标记 run failed，并交给调度器重试。
+    async def test_completion_status_update_failure_requests_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "api_token": "fake-token",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": tmp},
+                }
+            )
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            tracker = FakeTracker([item])
+            tracker.fail_status_update = True
+            events = EventStore()
+            runner = FakeAgentRunnerWithCodex(
+                config=config,
+                prompt_template="{{ issue.identifier }}",
+                tracker=tracker,
+                events=events,
+                fake_codex=FakeCodexClient(),
+            )
+            run_record = RunRecord(
+                issue_id=item.id,
+                identifier=item.identifier,
+                state="running",
+                workspace="",
+            )
+
+            result = await runner.run(item, run_record)
+
+            self.assertTrue(result.should_continue)
+            self.assertEqual(run_record.state, "failed")
+            self.assertIn("status update failed", run_record.last_error or "")
+            self.assertTrue(
+                any(
+                    event.event_type == "orchestrator.completion_status_update_failed"
+                    for event in events.recent()
+                )
+            )
 
 
 class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
@@ -667,6 +835,98 @@ Prompt body
         self.assertEqual(orchestrator.snapshot().settings_generation, 2)
         release.set()
         await asyncio.sleep(0)
+
+
+class DiagnosticsLoggingTest(unittest.TestCase):
+    """验证持久诊断日志、脱敏和诊断包导出。"""
+
+    # 函数说明：测试事件流会写入 JSONL，且 token 不会出现在查询结果或诊断包中。
+    def test_jsonl_logs_are_redacted_and_exportable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                configure_diagnostics(log_dir=tmp, level="DEBUG", retention_days=14, max_file_mb=1)
+                events = EventStore()
+                secret = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+
+                events.append(
+                    "test.error",
+                    f"失败 token={secret}",
+                    {
+                        "identifier": "acme/demo#1",
+                        "github_token": secret,
+                        "Authorization": f"Bearer {secret}",
+                        "error": secret,
+                    },
+                )
+
+                result = query_logs(q="test.error")
+                serialized = str(result)
+
+                self.assertEqual(len(result["entries"]), 1)
+                self.assertNotIn(secret, serialized)
+                self.assertIn("***", serialized)
+
+                bundle_path = export_diagnostics_bundle(
+                    state={"recent_events": [event.to_dict() for event in events.recent()]},
+                    settings_summary={"tracker": {"api_token": secret}},
+                )
+                with zipfile.ZipFile(bundle_path) as archive:
+                    for name in archive.namelist():
+                        content = archive.read(name).decode("utf-8")
+                        self.assertNotIn(secret, content)
+            finally:
+                stable_dir = Path(tempfile.gettempdir()) / "github-symphony-test-logs"
+                configure_diagnostics(log_dir=str(stable_dir), level="DEBUG")
+
+    # 函数说明：测试 Logs API 能返回配置、查询日志并导出诊断包路径。
+    def test_logs_api_config_query_and_export(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from symphony_github.api.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                configure_diagnostics(log_dir=tmp, level="DEBUG", retention_days=14, max_file_mb=1)
+                config = build_config(
+                    {
+                        "tracker": {
+                            "kind": "github_projects_v2",
+                            "owner_type": "org",
+                            "owner": "acme",
+                            "project_number": 1,
+                            "repositories": ["acme/demo"],
+                        },
+                        "workspace": {"root": "/tmp/github-symphony-test"},
+                    }
+                )
+                orchestrator = Orchestrator(
+                    config=config,
+                    prompt_template="old",
+                    tracker=FakeTracker([]),
+                    runner_factory=lambda: FakeRunner(asyncio.Event()),
+                    events=EventStore(),
+                )
+                orchestrator.events.append(
+                    "api.test",
+                    "日志 API 测试事件",
+                    {"identifier": "acme/demo#1"},
+                )
+                client = TestClient(create_app(orchestrator))
+
+                config_response = client.get("/api/v1/logs/config")
+                self.assertEqual(config_response.status_code, 200)
+                self.assertEqual(config_response.json()["log_dir"], str(Path(tmp).resolve()))
+
+                query_response = client.get("/api/v1/logs/query?q=api.test")
+                self.assertEqual(query_response.status_code, 200)
+                self.assertEqual(len(query_response.json()["entries"]), 1)
+
+                export_response = client.post("/api/v1/logs/export")
+                self.assertEqual(export_response.status_code, 200)
+                self.assertTrue(Path(export_response.json()["path"]).exists())
+            finally:
+                stable_dir = Path(tempfile.gettempdir()) / "github-symphony-test-logs"
+                configure_diagnostics(log_dir=str(stable_dir), level="DEBUG")
 
 
 # 函数说明：创建测试 WorkItem。

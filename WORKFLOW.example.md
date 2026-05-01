@@ -46,6 +46,18 @@ tools:
   github:
     enabled: true
     mode: read_write
+
+completion_policy:
+  kind: update_project_status
+  success_state: Done
+  failure_state: Rework
+  mark_done_after_successful_turn: true
+  close_issue: false
+
+logging:
+  level: DEBUG
+  retention_days: 14
+  max_file_mb: 10
 ---
 
 你正在处理 GitHub 任务：

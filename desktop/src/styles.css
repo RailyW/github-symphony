@@ -663,6 +663,138 @@ select {
   font-size: 12px;
 }
 
+.logsPage {
+  display: grid;
+  gap: 16px;
+}
+
+.logConfigGrid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.6fr) repeat(3, minmax(120px, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.logConfigGrid .metric {
+  min-width: 0;
+}
+
+.logConfigGrid .metric strong {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.panelActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid #eef2f6;
+  padding: 12px 14px;
+}
+
+.logFilters {
+  display: grid;
+  grid-template-columns: 140px repeat(3, minmax(150px, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 14px;
+}
+
+.logList {
+  display: grid;
+}
+
+.logEntry {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid #eef2f6;
+  padding: 12px 14px;
+}
+
+.logEntry:last-child {
+  border-bottom: 0;
+}
+
+.logEntry header {
+  display: grid;
+  grid-template-columns: 82px minmax(180px, 1fr) 86px minmax(120px, 180px);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  color: #667085;
+  font-size: 12px;
+}
+
+.logEntry p {
+  margin: 0;
+  color: #1d2430;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.logLevel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  border: 1px solid #c9d2df;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #344054;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.levelERROR .logLevel,
+.levelCRITICAL .logLevel {
+  border-color: #f4b6a8;
+  background: #fff4ef;
+  color: #8a2a19;
+}
+
+.levelWARNING .logLevel {
+  border-color: #f5d38a;
+  background: #fffbeb;
+  color: #8a5a00;
+}
+
+.logSource {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compactHint {
+  padding: 7px 9px;
+}
+
+.logDetails {
+  border: 1px solid #e6ebf1;
+  border-radius: 7px;
+  background: #f8fafc;
+  padding: 8px 10px;
+}
+
+.logDetails summary {
+  cursor: pointer;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.logDetails pre {
+  overflow: auto;
+  max-height: 260px;
+  margin: 8px 0 0;
+  color: #344054;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .helpPage {
   display: grid;
   gap: 16px;
@@ -738,7 +870,9 @@ select {
   .settingsLayout,
   .discoveryGrid,
   .statePickerGrid,
-  .formGrid {
+  .formGrid,
+  .logConfigGrid,
+  .logFilters {
     grid-template-columns: 1fr;
   }
 
@@ -751,7 +885,8 @@ select {
   }
 
   .row,
-  .events li {
+  .events li,
+  .logEntry header {
     grid-template-columns: 1fr;
   }
 

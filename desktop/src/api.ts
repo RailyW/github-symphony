@@ -1,4 +1,4 @@
-import type { EventRecord, StateSnapshot } from "./types";
+import type { EventRecord, LogConfig, LogQueryFilters, LogQueryResult, StateSnapshot } from "./types";
 
 // 函数说明：读取 preload 注入的 API 地址，浏览器调试时回退到默认端口。
 export function apiBaseUrl(): string {
@@ -50,4 +50,44 @@ export function restartRun(issueId: string): Promise<{ status: string }> {
 export function fetchEvents(cursor?: number): Promise<{ events: EventRecord[]; next_cursor: number }> {
   const query = cursor == null ? "" : `?cursor=${cursor}`;
   return requestJson<{ events: EventRecord[]; next_cursor: number }>(`/api/v1/events${query}`);
+}
+
+// 函数说明：读取后端持久日志配置；Electron 模式优先走 preload IPC。
+export function fetchLogConfig(): Promise<LogConfig> {
+  if (window.symphonyLogs) {
+    return window.symphonyLogs.config();
+  }
+  return requestJson<LogConfig>("/api/v1/logs/config");
+}
+
+// 函数说明：查询结构化日志；空过滤条件不会拼进 URL。
+export function queryLogs(filters: LogQueryFilters): Promise<LogQueryResult> {
+  if (window.symphonyLogs) {
+    return window.symphonyLogs.query(filters);
+  }
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value == null || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<LogQueryResult>(`/api/v1/logs/query${suffix}`);
+}
+
+// 函数说明：导出诊断包；浏览器调试模式直接请求本地后端。
+export function exportLogBundle(): Promise<{ path: string }> {
+  if (window.symphonyLogs) {
+    return window.symphonyLogs.exportBundle();
+  }
+  return requestJson<{ path: string }>("/api/v1/logs/export", { method: "POST" });
+}
+
+// 函数说明：打开日志目录；浏览器调试模式无法访问本地 shell，返回明确错误。
+export function openLogDirectory(): Promise<{ ok: boolean; error?: string }> {
+  if (window.symphonyLogs) {
+    return window.symphonyLogs.openDirectory();
+  }
+  return Promise.resolve({ ok: false, error: "打开日志目录需要在 Electron App 中使用" });
 }

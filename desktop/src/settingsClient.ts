@@ -64,6 +64,18 @@ export function defaultSettings(): AppSettings {
         mode: "read_write",
       },
     },
+    completion_policy: {
+      kind: "update_project_status",
+      success_state: "Done",
+      failure_state: "Rework",
+      mark_done_after_successful_turn: true,
+      close_issue: false,
+    },
+    logging: {
+      level: "DEBUG",
+      retention_days: 14,
+      max_file_mb: 10,
+    },
     prompt_template: [
       "你正在处理 GitHub 任务：",
       "",
@@ -84,12 +96,34 @@ export async function loadSettings(): Promise<SettingsLoadResult> {
   }
 
   const stored = window.localStorage.getItem("github-symphony-settings");
-  const settings = stored ? (JSON.parse(stored) as AppSettings) : defaultSettings();
+  const settings = stored ? mergeSettingsWithDefaults(JSON.parse(stored)) : defaultSettings();
   return {
     settings,
     token: { configured: false, encryptionAvailable: false },
     settingsPath: "localStorage:github-symphony-settings",
   };
+}
+
+// 函数说明：把旧版 localStorage settings 与当前默认结构合并，补齐新增字段。
+function mergeSettingsWithDefaults(stored: unknown): AppSettings {
+  return deepMerge(defaultSettings(), stored) as AppSettings;
+}
+
+// 函数说明：递归合并普通对象；数组和标量保留用户保存值。
+function deepMerge(defaults: unknown, stored: unknown): unknown {
+  if (!isPlainObject(defaults) || !isPlainObject(stored)) {
+    return stored ?? defaults;
+  }
+  const result: Record<string, unknown> = { ...defaults };
+  for (const [key, value] of Object.entries(stored)) {
+    result[key] = deepMerge(result[key], value);
+  }
+  return result;
+}
+
+// 函数说明：判断值是否为普通对象，避免把数组当成对象递归合并。
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 // 函数说明：保存 App settings；Electron 模式下由 main process 处理 safeStorage。

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from symphony_github.api.server import run_app
+from symphony_github.core.diagnostics import configure_diagnostics, current_diagnostics_config
 from symphony_github.core.events import EventStore
 from symphony_github.core.orchestrator import Orchestrator
 from symphony_github.core.runtime import build_runtime_components
@@ -42,7 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("workflow", nargs="?", default="WORKFLOW.md")
     run_parser.add_argument("--host", default="127.0.0.1")
     run_parser.add_argument("--port", type=int, default=8765)
-    run_parser.add_argument("--log-level", default="info")
+    run_parser.add_argument("--log-level", default="debug")
+    run_parser.add_argument("--log-dir", default=None)
 
     subparsers.add_parser("doctor", help="Check local runtime requirements")
 
@@ -57,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
 # 函数说明：执行 run 子命令，装配 tracker、runner 和 API server。
 def run_command(args: argparse.Namespace) -> int:
     workflow = load_workflow(args.workflow)
+    configure_diagnostics(
+        log_dir=args.log_dir,
+        level=args.log_level or workflow.config.logging.level,
+        retention_days=workflow.config.logging.retention_days,
+        max_file_mb=workflow.config.logging.max_file_mb,
+    )
     events = EventStore()
     runtime = build_runtime_components(workflow.config, workflow.prompt_template, events)
 
@@ -73,6 +81,7 @@ def run_command(args: argparse.Namespace) -> int:
 
 # 函数说明：执行 doctor 子命令，检查本地环境。
 def doctor_command(args: argparse.Namespace) -> int:
+    log_config = current_diagnostics_config()
     checks = {
         "python": sys.version.split()[0],
         "node": _command_version("node", "--version"),
@@ -80,6 +89,7 @@ def doctor_command(args: argparse.Namespace) -> int:
         "codex": _command_version("codex", "--version"),
         "gh": _command_version("gh", "--version"),
         "GITHUB_TOKEN": "set" if os.environ.get("GITHUB_TOKEN") else "missing",
+        "log_dir": f"writable:{_path_writable(log_config.log_dir)} {log_config.log_dir}",
     }
 
     for name, value in checks.items():
@@ -129,6 +139,19 @@ def _command_version(command: str, *args: str) -> str:
         check=False,
     )
     return (result.stdout or "").splitlines()[0] if result.stdout else "unknown"
+
+
+# 函数说明：检查目录是否可写，doctor 用它提示日志系统是否能落盘。
+def _path_writable(path: str) -> bool:
+    directory = Path(path).expanduser()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 # 函数说明：当包内无法定位根目录示例时使用内嵌最小模板。

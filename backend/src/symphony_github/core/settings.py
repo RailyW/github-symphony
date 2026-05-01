@@ -59,6 +59,8 @@ def settings_to_raw_config(
     codex_raw = _mapping(raw_settings.get("codex"))
     tools_raw = _mapping(raw_settings.get("tools"))
     github_tools_raw = _mapping(tools_raw.get("github"))
+    completion_raw = _mapping(raw_settings.get("completion_policy"))
+    logging_raw = _mapping(raw_settings.get("logging"))
 
     tracker: Dict[str, Any] = {
         "kind": "github_projects_v2",
@@ -115,6 +117,20 @@ def settings_to_raw_config(
                 "mode": github_tools_raw.get("mode", "read_write"),
             }
         },
+        "completion_policy": {
+            "kind": completion_raw.get("kind", "update_project_status"),
+            "success_state": completion_raw.get("success_state", "Done"),
+            "failure_state": _optional_value(completion_raw.get("failure_state", "Rework")),
+            "mark_done_after_successful_turn": bool(
+                completion_raw.get("mark_done_after_successful_turn", True)
+            ),
+            "close_issue": bool(completion_raw.get("close_issue", False)),
+        },
+        "logging": {
+            "level": logging_raw.get("level", "DEBUG"),
+            "retention_days": logging_raw.get("retention_days", 14),
+            "max_file_mb": logging_raw.get("max_file_mb", 10),
+        },
     }
 
 
@@ -144,6 +160,8 @@ def settings_from_config(config: SymphonyConfig, prompt_template: str) -> Dict[s
         "agent": dataclass_to_dict(config.agent),
         "codex": dataclass_to_dict(config.codex),
         "tools": dataclass_to_dict(config.tools),
+        "completion_policy": dataclass_to_dict(config.completion_policy),
+        "logging": dataclass_to_dict(config.logging),
         "prompt_template": prompt_template,
     }
 
@@ -216,6 +234,18 @@ def default_app_settings() -> Dict[str, Any]:
             "turn_sandbox_policy": {"type": "workspaceWrite", "networkAccess": True},
         },
         "tools": {"github": {"enabled": True, "mode": "read_write"}},
+        "completion_policy": {
+            "kind": "update_project_status",
+            "success_state": "Done",
+            "failure_state": "Rework",
+            "mark_done_after_successful_turn": True,
+            "close_issue": False,
+        },
+        "logging": {
+            "level": "DEBUG",
+            "retention_days": 14,
+            "max_file_mb": 10,
+        },
         "prompt_template": (
             "你正在处理 GitHub 任务：\n\n"
             "- 标识：`{{ issue.identifier }}`\n"
