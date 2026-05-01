@@ -8,6 +8,9 @@
 - `Status` single-select 字段映射为 `WorkItem.state`。
 - 配置的 `priority_field` 会被解析为排序字段；缺失时任务排在同等状态的后面。
 - Issue dependencies 用 REST API 查询；不可用时按配置降级为“不阻塞”并记录事件。
+- Tracker 会先按目标 `Status` 预过滤 Project item，再对可派发候选任务读取
+  dependencies；状态回查只读取 Project 状态，避免对 Done/Handoff 项产生无意义
+  REST 请求。
 
 ## 动态工具
 

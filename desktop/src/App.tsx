@@ -267,6 +267,7 @@ function DashboardPage({
   onRestart: (issueId: string) => void;
 }): JSX.Element {
   const metrics = useMemo(() => summarizeState(state), [state]);
+  const recentEvents = dashboardRecentEvents(state?.recent_events || []);
 
   return (
     <>
@@ -288,7 +289,7 @@ function DashboardPage({
       </section>
 
       <Panel title="Recent Events" icon={<AlertCircle size={17} aria-hidden="true" />}>
-        <EventList events={state?.recent_events || []} />
+        <EventList events={recentEvents} emptyText="No notable events" />
       </Panel>
     </>
   );
@@ -1663,10 +1664,36 @@ function CandidateList({ items }: { items: WorkItem[] }): JSX.Element {
   );
 }
 
+// 函数说明：过滤 Dashboard 上展示的事件，避免常规诊断 poll 淹没真正需要关注的事件。
+function dashboardRecentEvents(events: EventRecord[]): EventRecord[] {
+  return events.filter(isDashboardEvent);
+}
+
+// 函数说明：判断事件是否适合放在 Dashboard 摘要列表中。
+function isDashboardEvent(event: EventRecord): boolean {
+  // 逻辑说明：`github.debug` 是正常轮询诊断，详情仍可在 Logs 页面按类型查询。
+  if (event.event_type.endsWith(".debug")) {
+    return false;
+  }
+
+  // 逻辑说明：Codex notification 是 app-server 流式协议细节，Dashboard 只保留汇总事件。
+  if (event.event_type === "codex.notification") {
+    return false;
+  }
+
+  return true;
+}
+
 // 函数说明：渲染最近事件。
-function EventList({ events }: { events: EventRecord[] }): JSX.Element {
+function EventList({
+  events,
+  emptyText = "No events",
+}: {
+  events: EventRecord[];
+  emptyText?: string;
+}): JSX.Element {
   if (events.length === 0) {
-    return <EmptyState text="No events" />;
+    return <EmptyState text={emptyText} />;
   }
 
   return (

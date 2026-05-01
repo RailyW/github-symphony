@@ -37,7 +37,7 @@ npm run package
 
 ## UI 职责
 
-- `Dashboard` 展示运行中 agent、候选任务和最近事件。
+- `Dashboard` 展示运行中 agent、候选任务和最近重要事件；常规 poll/debug 诊断保留在 `Logs`。
 - `Settings` 提供 GitHub Project、Workspace、Agent、Completion、Codex、Tools、Logging、Prompt 分区配置。
 - `Settings / GitHub Project` 会从 GitHub 读取 owner、Projects v2、Status 字段、状态选项和 Project 中出现过的仓库，减少手工填写。
 - `Settings / GitHub Project` 支持把任意自定义 Status 选项分配为 Active、Handoff、Terminal 三类阶段。
