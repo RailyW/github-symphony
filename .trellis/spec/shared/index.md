@@ -8,6 +8,7 @@
 
 | File                                               | Description                       | When to Read           |
 | -------------------------------------------------- | --------------------------------- | ---------------------- |
+| [project-context.md](./project-context.md)         | Project lineage and AI permissions | Always                 |
 | [code-quality.md](./code-quality.md)               | Code quality mandatory rules      | Always                 |
 | [typescript.md](./typescript.md)                   | TypeScript best practices         | Type-related decisions |
 | [git-conventions.md](./git-conventions.md)         | Git commit and branch conventions | Before committing      |
@@ -20,6 +21,7 @@
 
 | Task                  | File                                       |
 | --------------------- | ------------------------------------------ |
+| Project context       | [project-context.md](./project-context.md) |
 | Code quality rules    | [code-quality.md](./code-quality.md)       |
 | Type annotations      | [typescript.md](./typescript.md)           |
 | Commit message format | [git-conventions.md](./git-conventions.md) |
@@ -32,6 +34,7 @@
 
 | Rule                                 | File                                       |
 | ------------------------------------ | ------------------------------------------ |
+| Use upstream template as reference   | [project-context.md](./project-context.md) |
 | No non-null assertions (`!`)         | [code-quality.md](./code-quality.md)       |
 | Use explicit type annotations        | [typescript.md](./typescript.md)           |
 | Follow commit message format         | [git-conventions.md](./git-conventions.md) |

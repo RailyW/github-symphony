@@ -1,6 +1,6 @@
 # GitHub Symphony
 
-GitHub Symphony 是一个面向 GitHub Projects v2 的本地 Codex 编排器。它参考 OpenAI Symphony 的概念：长期运行的服务持续读取任务板，在满足状态、依赖和并发条件时，为每个任务创建独立工作区并启动 Codex app-server 处理工作。
+GitHub Symphony 是一个面向 GitHub Projects v2 的本地 Codex 编排器。本项目以 OpenAI 在 GitHub 开源的 [symphony](https://github.com/openai/symphony) 仓库为模板进行二次开发：长期运行的服务持续读取任务板，在满足状态、依赖和并发条件时，为每个任务创建独立工作区并启动 Codex app-server 处理工作。
 
 当前仓库采用 monorepo：
 

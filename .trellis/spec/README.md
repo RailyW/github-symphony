@@ -38,6 +38,7 @@ Electron main process development patterns:
 
 Cross-cutting concerns:
 
+- [Project Context](./shared/project-context.md)
 - [TypeScript Conventions](./shared/typescript.md)
 - [Code Quality](./shared/code-quality.md)
 - [Git Conventions](./shared/git-conventions.md)

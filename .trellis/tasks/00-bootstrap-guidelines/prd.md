@@ -21,6 +21,7 @@ the rest conversationally.
 
 ## Status (update the checkboxes as you complete each item)
 
+- [x] Add project-level upstream template and Codex git-operation authority rules
 - [ ] Fill frontend guidelines
 - [ ] Add code examples
 

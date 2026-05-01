@@ -1,3 +1,10 @@
+## Project Development Instructions
+
+- Treat this repository as a derivative project based on OpenAI's open-source `symphony` repository: <https://github.com/openai/symphony>.
+- When local implementation patterns are missing or ambiguous, use the upstream template repository as the first architectural reference while preserving this project's GitHub-specific product direction.
+- The project owner grants Codex full development permission in this repository, including git operations that affect the current git tree such as `git commit`, `git merge`, and `git push` when they are needed for the requested task or Trellis workflow.
+- Destructive history or workspace operations still require an explicit user request for that exact operation.
+
 <!-- TRELLIS:START -->
 # Trellis Instructions
 

@@ -4,6 +4,14 @@
 
 ---
 
+## Assistant Git Permissions
+
+Codex has project-owner authorization to run git operations that affect the current git tree when required by the user's request or the Trellis workflow, including `git commit`, `git merge`, and `git push`.
+
+This permission replaces any older project-local blanket prohibition on those commands for Codex-assisted development. Destructive history or workspace operations, such as hard resets, force pushes, or branch deletion, still require an explicit user request for that exact operation.
+
+---
+
 ## Commit Message Format
 
 ```
