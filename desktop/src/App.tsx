@@ -644,12 +644,27 @@ function GitHubSettings({
       const statusOptions = statusField.options.map((option) => option.name);
       const activeStates = chooseStates(statusOptions, ["Todo", "In Progress", "Rework"], "first");
       const terminalStates = chooseStates(statusOptions, ["Done", "Closed", "Cancelled"], "last");
-      const successState = terminalStates.includes(settings.completion_policy.success_state)
-        ? settings.completion_policy.success_state
-        : terminalStates.find((state) => state === "Done") || terminalStates[0] || "Done";
+      const handoffStates = chooseHandoffStates(
+        statusOptions,
+        activeStates,
+        terminalStates,
+        settings.tracker.handoff_states,
+      );
+      const successState = chooseSuccessState(
+        statusOptions,
+        activeStates,
+        handoffStates,
+        terminalStates,
+        settings.completion_policy.success_state,
+      );
       const failureState = statusOptions.includes(settings.completion_policy.failure_state || "")
         ? settings.completion_policy.failure_state
         : statusOptions.find((state) => state === "Rework") || activeStates[0] || null;
+      const blockedStates = chooseBlockedStates(
+        statusOptions,
+        activeStates,
+        settings.blocker_policy.blocked_states,
+      );
 
       setProjectDiscovery(result);
       updateSettings(onChange, settings, (draft) => {
@@ -657,9 +672,12 @@ function GitHubSettings({
         draft.tracker.owner = owner.login;
         draft.tracker.project_number = projectNumber;
         draft.tracker.status_field = statusField.name;
+        draft.tracker.status_options = statusOptions;
         draft.tracker.priority_field = priorityField?.name || null;
         draft.tracker.active_states = activeStates;
+        draft.tracker.handoff_states = handoffStates;
         draft.tracker.terminal_states = terminalStates;
+        draft.blocker_policy.blocked_states = blockedStates;
         draft.completion_policy.success_state = successState;
         draft.completion_policy.failure_state = failureState;
         if (result.repositories.length) {
@@ -683,7 +701,12 @@ function GitHubSettings({
   const statusField = projectDiscovery
     ? chooseStatusField(projectDiscovery.status_fields, settings.tracker.status_field)
     : null;
-  const statusOptions = statusField?.options.map((option) => option.name) || [];
+  const statusOptions = statusField?.options.map((option) => option.name) || settings.tracker.status_options || [];
+  const ungroupedStates = statusOptions.filter(
+    (state) => !settings.tracker.active_states.includes(state)
+      && !settings.tracker.handoff_states.includes(state)
+      && !settings.tracker.terminal_states.includes(state),
+  );
 
   return (
     <>
@@ -799,6 +822,14 @@ function GitHubSettings({
             })}
           />
           <OptionChecklist
+            label="Handoff States"
+            options={statusOptions}
+            selected={settings.tracker.handoff_states}
+            onChange={(values) => updateSettings(onChange, settings, (draft) => {
+              draft.tracker.handoff_states = values;
+            })}
+          />
+          <OptionChecklist
             label="Terminal States"
             options={statusOptions}
             selected={settings.tracker.terminal_states}
@@ -806,9 +837,10 @@ function GitHubSettings({
               draft.tracker.terminal_states = values;
             })}
           />
+          <StateRoleSummary ungroupedStates={ungroupedStates} />
         </div>
       ) : (
-        <div className="inlineHint">连接 GitHub 并加载 Project 后，可以在这里勾选 active/terminal 状态。</div>
+        <div className="inlineHint">连接 GitHub 并加载 Project 后，可以在这里勾选 active/handoff/terminal 状态。</div>
       )}
       <ListEditor
         label="Repositories"
@@ -942,46 +974,41 @@ function CompletionSettings({
   settings: AppSettings;
   onChange: (settings: AppSettings) => void;
 }): JSX.Element {
-  const knownStates = Array.from(
-    new Set([
-      ...settings.tracker.terminal_states,
-      settings.completion_policy.success_state,
-      settings.completion_policy.failure_state || "Rework",
-    ].filter(Boolean)),
-  );
+  const knownStates = knownStatusStates(settings);
 
   return (
     <>
       <SectionIntro
         title="Completion"
-        text="Codex turn 正常完成后，App 会把 Project item 的 Status 更新到成功状态，让任务离开 active states，避免下一轮 poll 重复派发。"
+        text="配置 Codex turn 正常完成后的目标/交接阶段。目标可以是 Human Review、Ready for QA、Shipped 等任意非 active 阶段，不必固定为 Done。"
       />
       <div className="formGrid">
         <SelectField
           label="Policy Kind"
           value={settings.completion_policy.kind}
-          options={["update_project_status", "none"]}
+          options={["update_project_status", "agent_managed", "none"]}
           onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.completion_policy.kind = value as "update_project_status" | "none";
+            draft.completion_policy.kind = value as AppSettings["completion_policy"]["kind"];
           })}
         />
         <SelectField
-          label="Success State"
+          label="Success Target State"
           value={settings.completion_policy.success_state}
           options={knownStates}
           onChange={(value) => updateSettings(onChange, settings, (draft) => {
             draft.completion_policy.success_state = value;
           })}
         />
-        <TextField
+        <SelectField
           label="Failure State"
-          value={settings.completion_policy.failure_state || ""}
+          value={settings.completion_policy.failure_state || "none"}
+          options={["none", ...knownStates]}
           onChange={(value) => updateSettings(onChange, settings, (draft) => {
-            draft.completion_policy.failure_state = value || null;
+            draft.completion_policy.failure_state = value === "none" ? null : value;
           })}
         />
         <ToggleField
-          label="Mark Done After Successful Turn"
+          label="Move To Target After Successful Turn"
           checked={settings.completion_policy.mark_done_after_successful_turn}
           onChange={(value) => updateSettings(onChange, settings, (draft) => {
             draft.completion_policy.mark_done_after_successful_turn = value;
@@ -996,8 +1023,8 @@ function CompletionSettings({
         />
       </div>
       <div className="inlineHint">
-        当前版本只自动更新 GitHub Project Status，不会自动关闭 Issue、merge PR、push 代码。
-        如果 Success State 不存在于 Project 的 Status 选项中，运行阶段会记录错误并进入重试。
+        update_project_status 会由 App 自动把 Project Status 改到目标阶段；agent_managed 会交给 prompt
+        和 GitHub 工具自行流转；none 不做状态写入。当前版本不会自动关闭 Issue、merge PR、push 代码。
       </div>
     </>
   );
@@ -1114,11 +1141,13 @@ function ToolSettings({
   settings: AppSettings;
   onChange: (settings: AppSettings) => void;
 }): JSX.Element {
+  const knownStates = knownStatusStates(settings);
+
   return (
     <>
       <SectionIntro
         title="GitHub Dynamic Tools"
-        text="控制注入给 Codex agent 的 GitHub GraphQL / REST 工具。read_write 允许写操作，但仍受 token 权限和 allowlist 限制。"
+        text="控制注入给 Codex agent 的 GitHub GraphQL / REST 工具，以及 issue dependencies 只在哪些阶段阻塞派发。"
       />
       <div className="formGrid">
         <ToggleField
@@ -1145,6 +1174,14 @@ function ToolSettings({
           })}
         />
       </div>
+      <OptionChecklist
+        label="Blocked States"
+        options={knownStates}
+        selected={settings.blocker_policy.blocked_states}
+        onChange={(values) => updateSettings(onChange, settings, (draft) => {
+          draft.blocker_policy.blocked_states = values;
+        })}
+      />
     </>
   );
 }
@@ -1161,7 +1198,7 @@ function PromptSettings({
     <>
       <SectionIntro
         title="Prompt Template"
-        text="这里是原 WORKFLOW.md 的 Markdown body。模板使用 Jinja2 StrictUndefined，可访问 issue、tracker、workspace、env。"
+        text="这里是原 WORKFLOW.md 的 Markdown body。模板使用 Jinja2 StrictUndefined，可访问 issue、tracker、workflow、workspace、env。"
       />
       <TextAreaField
         label="Prompt"
@@ -1176,6 +1213,8 @@ function PromptSettings({
         <code>{"{{ issue.title }}"}</code>
         <code>{"{{ issue.repository }}"}</code>
         <code>{"{{ issue.url }}"}</code>
+        <code>{"{{ workflow.status_policy_markdown }}"}</code>
+        <code>{"{{ workflow.success_state }}"}</code>
       </div>
     </>
   );
@@ -1410,11 +1449,12 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
     {
       title: "快速开始",
       paragraphs: [
-        "先准备一个 GitHub Project v2，并确保它包含 Status single-select 字段。把要处理的 Issue/PR 加到 Project，并设置 active state，例如 Todo、In Progress 或 Rework。",
+        "先准备一个 GitHub Project v2，并确保它包含 Status single-select 字段。状态名称可以完全自定义，例如 Ready、Coding、Human Review、Rework、Shipped；App 只关心你把这些状态分配成哪些角色。",
       ],
       items: [
         "在 Settings / GitHub Project 顶部粘贴 PAT，点击 Connect PAT，然后选择 owner 和 Project。",
         "点击 Load Project Details，让 App 自动读取 Status 字段、状态选项和 Project 中出现过的仓库。",
+        "在 GitHub Project 页把阶段分成 Active、Handoff、Terminal 三类，并在 Tools 里选择哪些阶段会受 issue dependencies 阻塞。",
         "只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub 时需要相应写权限。",
         "在 Workspace 设置 root 和 after_create hook。常见 hook 是 git clone 目标仓库到当前工作区。",
         "在 Prompt 中写明 agent 的工作边界、验证要求、是否允许创建分支或远端评论。",
@@ -1424,13 +1464,14 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
     {
       title: "GitHub Projects v2 概念",
       paragraphs: [
-        "Project number 是 GitHub Project URL 中的数字，不是仓库 Issue 编号。Status 字段必须是 Project 的 single-select 字段，本 App 用它判断任务是否 active 或 terminal。",
+        "Project number 是 GitHub Project URL 中的数字，不是仓库 Issue 编号。Status 字段必须是 Project 的 single-select 字段，本 App 用它判断任务是否可派发、等待交接或已经结束。",
       ],
       items: [
-        "Active states：允许派发的状态，例如 Todo、In Progress、Rework。",
-        "Terminal states：认为已结束的状态，例如 Done、Closed、Cancelled。",
+        "Active states：允许派发给 Codex agent 的状态，例如 Ready、Coding、Rework。",
+        "Handoff states：不再自动派发、等待人工或外部系统接手的状态，例如 Human Review、QA Review、Waiting for Approval。",
+        "Terminal states：真正结束、可用于未来清理策略的状态，例如 Shipped、Closed、Cancelled。",
         "Priority 字段可选；如果配置，候选任务会按 priority 升序、创建时间、identifier 排序。",
-        "Issue dependencies 可用于阻塞 Todo 任务；API 不可用时按 blocker policy 处理。",
+        "Issue dependencies 只会阻塞你在 Blocked States 中勾选的阶段；API 不可用时按 blocker policy 处理。",
       ],
     },
     {
@@ -1443,7 +1484,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "GitHub Project 页会通过 PAT discovery 填充 owner、project number、Status 字段、状态和 repositories。",
         "Workspace root 可以使用 ~，每个任务会在 root 下创建独立目录。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
-        "Completion 默认会在成功 turn 后把 Project Status 更新为 Done，避免同一 Todo 被重复派发。",
+        "Completion 默认会在成功 turn 后把 Project Status 更新到 Success Target State；这个目标可以是 Human Review 或 Ready for QA，不必是 Done。",
         "Logging 默认 DEBUG、保留 14 天，可在 Logs 页面查询和导出诊断包。",
         "Tools mode 为 read_only 时会拒绝 REST 写操作和 GraphQL mutation。",
       ],
@@ -1455,8 +1496,10 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
       ],
       items: [
         "常用变量：{{ issue.identifier }}、{{ issue.title }}、{{ issue.repository }}、{{ issue.url }}。",
+        "阶段策略变量：{{ workflow.status_policy_markdown }}、{{ workflow.active_states }}、{{ workflow.success_state }}。",
         "明确要求 agent 先阅读 Issue/PR 描述和相关代码，再做最小必要修改。",
         "明确验证方式，例如运行哪些测试、如何汇报失败原因。",
+        "如果 completion policy 是 agent_managed，要在 prompt 中要求 agent 使用 GitHub 工具把 Project Status 移到目标交接阶段。",
         "如果不希望自动 push/merge，直接写入 prompt；同时保持 token 权限最小化。",
       ],
     },
@@ -1902,6 +1945,26 @@ function OptionChecklist({
   );
 }
 
+// 函数说明：展示尚未分配角色的 GitHub Status 选项，提醒用户补齐阶段策略。
+function StateRoleSummary({ ungroupedStates }: { ungroupedStates: string[] }): JSX.Element {
+  return (
+    <div className="optionChecklist">
+      <span>Ungrouped States</span>
+      <div className="checkRows">
+        {ungroupedStates.length ? (
+          ungroupedStates.map((state) => (
+            <span className="checkRow passiveCheckRow" key={state}>
+              {state}
+            </span>
+          ))
+        ) : (
+          <span className="mutedText">所有已发现阶段都已分组</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 函数说明：选择最合适的 Status 字段，优先沿用当前配置，其次使用名为 Status 的字段。
 function chooseStatusField(
   fields: GitHubProjectFieldOption[],
@@ -1936,6 +1999,102 @@ function chooseStates(options: string[], preferred: string[], fallback: "first" 
   }
   const fallbackValue = fallback === "first" ? options[0] : options[options.length - 1];
   return fallbackValue ? [fallbackValue] : [];
+}
+
+// 函数说明：根据已有配置和常见 review/QA 命名推荐 handoff 阶段。
+function chooseHandoffStates(
+  options: string[],
+  activeStates: string[],
+  terminalStates: string[],
+  currentHandoffStates: string[],
+): string[] {
+  const reusable = normalizeToKnownOrder(options, currentHandoffStates).filter(
+    (state) => !activeStates.includes(state) && !terminalStates.includes(state),
+  );
+  if (reusable.length) {
+    return reusable;
+  }
+  return options.filter(
+    (state) => isReviewLikeState(state)
+      && !activeStates.includes(state)
+      && !terminalStates.includes(state),
+  );
+}
+
+// 函数说明：为自动完成策略选择一个非 active 的目标/交接阶段。
+function chooseSuccessState(
+  options: string[],
+  activeStates: string[],
+  handoffStates: string[],
+  terminalStates: string[],
+  currentSuccessState: string,
+): string {
+  const nonActiveStates = options.filter((state) => !activeStates.includes(state));
+  if (currentSuccessState && nonActiveStates.includes(currentSuccessState)) {
+    return currentSuccessState;
+  }
+  const humanReview = handoffStates.find((state) => state.toLowerCase() === "human review");
+  if (humanReview) {
+    return humanReview;
+  }
+  const reviewState = handoffStates.find((state) => isReviewLikeState(state));
+  if (reviewState) {
+    return reviewState;
+  }
+  const doneState = terminalStates.find((state) => state.toLowerCase() === "done");
+  if (doneState) {
+    return doneState;
+  }
+  if (terminalStates[0]) {
+    return terminalStates[0];
+  }
+  return nonActiveStates[nonActiveStates.length - 1] || options[options.length - 1] || currentSuccessState || "";
+}
+
+// 函数说明：为 issue dependencies 选择适用的阻塞阶段，优先沿用当前配置。
+function chooseBlockedStates(
+  options: string[],
+  activeStates: string[],
+  currentBlockedStates: string[],
+): string[] {
+  const reusable = normalizeToKnownOrder(options, currentBlockedStates);
+  if (reusable.length) {
+    return reusable;
+  }
+  if (options.includes("Todo")) {
+    return ["Todo"];
+  }
+  return activeStates[0] ? [activeStates[0]] : [];
+}
+
+// 函数说明：按 GitHub Status option 顺序保留已知状态，避免保存拼错或陈旧状态。
+function normalizeToKnownOrder(options: string[], values: string[]): string[] {
+  const selected = new Set(values);
+  return options.filter((option) => selected.has(option));
+}
+
+// 函数说明：识别常见人工检查、QA、审批、验证类阶段名称。
+function isReviewLikeState(state: string): boolean {
+  const normalized = state.toLowerCase();
+  return ["review", "qa", "approval", "approve", "verify", "verification", "validation"].some(
+    (keyword) => normalized.includes(keyword),
+  );
+}
+
+// 函数说明：汇总当前配置中可用于下拉框的所有阶段名称，优先使用 discovery 缓存。
+function knownStatusStates(settings: AppSettings): string[] {
+  return Array.from(
+    new Set(
+      [
+        ...settings.tracker.status_options,
+        ...settings.tracker.active_states,
+        ...settings.tracker.handoff_states,
+        ...settings.tracker.terminal_states,
+        settings.completion_policy.success_state,
+        settings.completion_policy.failure_state || "",
+      ].filter(Boolean),
+    ),
+  );
 }
 
 // 函数说明：根据表单状态生成 token 更新语义。

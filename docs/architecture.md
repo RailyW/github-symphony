@@ -30,8 +30,19 @@ flowchart LR
 1. 刷新运行中任务状态。
 2. 读取 active states 中的 Project items。
 3. 按 priority、created_at、identifier 排序。
-4. 跳过 running/claimed、terminal、阻塞 Todo、超过并发槽的任务。
+4. 跳过 running/claimed、terminal、配置为 blocked states 且存在未完成依赖、超过并发槽的任务。
 5. 为可派发任务创建 runner。
+
+## Status Policy
+
+GitHub Project 的 `Status` single-select 选项可以完全自定义。配置层把状态分成四类：
+
+- `active_states`：允许调度器派发给 Codex agent 的阶段。
+- `handoff_states`：成功运行后可交接给人工或外部流程的阶段，不会继续派发，也不视为终态清理。
+- `terminal_states`：真正结束的阶段，供未来 workspace 清理和终态判断使用。
+- `blocker_policy.blocked_states`：只有这些阶段会因为 GitHub issue dependencies 的未完成依赖而暂停派发。
+
+`completion_policy.success_state` 的语义是成功 turn 后的目标/交接阶段，可以是 `Human Review`、`Ready for QA`、`Done` 或任意非 active 状态。默认 `update_project_status` 由 App 自动更新 Project item；`agent_managed` 则由 prompt 指示 agent 通过 GitHub 工具自行流转状态。
 
 ## Recovery Model
 

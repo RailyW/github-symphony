@@ -623,6 +623,15 @@ select {
   height: 14px;
 }
 
+.passiveCheckRow {
+  color: #667085;
+}
+
+.mutedText {
+  color: #667085;
+  font-size: 12px;
+}
+
 .inlineHint {
   border: 1px solid #d9e0ea;
   border-radius: 8px;

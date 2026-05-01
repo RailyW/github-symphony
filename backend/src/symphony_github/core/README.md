@@ -11,7 +11,9 @@
 - 管理内存事件流、当前运行快照和持久 JSONL 诊断日志。
 - 为每个 GitHub work item 创建独立工作区并执行 hooks。
 - 根据状态、依赖、并发槽和重试策略派发 Codex agent。
-- 在 Codex turn 正常完成后按 `completion_policy` 更新 GitHub Project Status，避免任务仍处于 active state 时被重复派发。
+- 将 GitHub Project Status 建模为 `active_states`、`handoff_states`、`terminal_states` 和 `blocked_states`，支持任意自定义阶段名。
+- 在 Codex turn 正常完成后按 `completion_policy` 更新 GitHub Project Status 到目标/交接阶段，避免任务仍处于 active state 时被重复派发。
+- 为 prompt 注入 `workflow.status_policy_markdown` 和结构化阶段策略，让 agent 自动适应当前 Project 配置。
 - 支持热应用新配置；已运行 agent 保留派发时的配置和 runner。
 - 提供日志脱敏、轮转、查询和诊断包导出辅助逻辑。
 

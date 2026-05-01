@@ -163,7 +163,9 @@ function defaultSettings(): Record<string, unknown> {
       project_number: 12,
       repositories: ["your-org/your-repo"],
       status_field: "Status",
+      status_options: ["Todo", "In Progress", "Rework", "Done", "Closed", "Cancelled"],
       active_states: ["Todo", "In Progress", "Rework"],
+      handoff_states: [],
       terminal_states: ["Done", "Closed", "Cancelled"],
       priority_field: "Priority",
       api_base_url: "https://api.github.com",
@@ -172,6 +174,7 @@ function defaultSettings(): Record<string, unknown> {
     blocker_policy: {
       kind: "github_issue_dependencies",
       unavailable_behavior: "treat_unblocked",
+      blocked_states: ["Todo"],
     },
     workspace: {
       root: "~/code/github-symphony-workspaces",
@@ -301,7 +304,9 @@ function readBundledPromptTemplate(): string {
     "- 仓库：`{{ issue.repository }}`",
     "- 链接：`{{ issue.url }}`",
     "",
-    "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。",
+    "{{ workflow.status_policy_markdown }}",
+    "",
+    "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。完成后请根据阶段策略交接任务。",
   ].join("\n");
 }
 

@@ -57,7 +57,9 @@ export type AppSettings = {
     project_number: number;
     repositories: string[];
     status_field: string;
+    status_options: string[];
     active_states: string[];
+    handoff_states: string[];
     terminal_states: string[];
     priority_field: string | null;
     api_base_url: string;
@@ -66,6 +68,7 @@ export type AppSettings = {
   blocker_policy: {
     kind: string;
     unavailable_behavior: string;
+    blocked_states: string[];
   };
   workspace: {
     root: string;
@@ -94,7 +97,7 @@ export type AppSettings = {
     };
   };
   completion_policy: {
-    kind: "update_project_status" | "none";
+    kind: "update_project_status" | "agent_managed" | "none";
     success_state: string;
     failure_state: string | null;
     mark_done_after_successful_turn: boolean;

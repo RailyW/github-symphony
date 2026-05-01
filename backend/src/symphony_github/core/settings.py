@@ -69,7 +69,9 @@ def settings_to_raw_config(
         "project_number": tracker_raw.get("project_number"),
         "repositories": tracker_raw.get("repositories", []),
         "status_field": tracker_raw.get("status_field", "Status"),
+        "status_options": tracker_raw.get("status_options", []),
         "active_states": tracker_raw.get("active_states", ["Todo", "In Progress", "Rework"]),
+        "handoff_states": tracker_raw.get("handoff_states", []),
         "terminal_states": tracker_raw.get("terminal_states", ["Done", "Closed", "Cancelled"]),
         "priority_field": _optional_value(tracker_raw.get("priority_field")),
         "api_base_url": tracker_raw.get("api_base_url", "https://api.github.com"),
@@ -82,12 +84,18 @@ def settings_to_raw_config(
     elif token_placeholder:
         tracker["api_token"] = token_placeholder
 
+    blocker_policy: Dict[str, Any] = {
+        "kind": blocker_raw.get("kind", "github_issue_dependencies"),
+        "unavailable_behavior": blocker_raw.get("unavailable_behavior", "treat_unblocked"),
+    }
+    # 逻辑说明：旧版 App settings 没有 blocked_states。这里不强行写入 Todo，
+    # 让 config 层可根据已发现 status_options 自动退到第一个 active state。
+    if "blocked_states" in blocker_raw:
+        blocker_policy["blocked_states"] = blocker_raw.get("blocked_states", [])
+
     return {
         "tracker": tracker,
-        "blocker_policy": {
-            "kind": blocker_raw.get("kind", "github_issue_dependencies"),
-            "unavailable_behavior": blocker_raw.get("unavailable_behavior", "treat_unblocked"),
-        },
+        "blocker_policy": blocker_policy,
         "workspace": {
             "root": workspace_raw.get("root"),
             "cleanup_terminal_workspaces": bool(
@@ -145,7 +153,9 @@ def settings_from_config(config: SymphonyConfig, prompt_template: str) -> Dict[s
             "project_number": tracker.project_number,
             "repositories": list(tracker.repositories),
             "status_field": tracker.status_field,
+            "status_options": list(tracker.status_options),
             "active_states": list(tracker.active_states),
+            "handoff_states": list(tracker.handoff_states),
             "terminal_states": list(tracker.terminal_states),
             "priority_field": tracker.priority_field,
             "api_base_url": tracker.api_base_url,
@@ -205,7 +215,9 @@ def default_app_settings() -> Dict[str, Any]:
             "project_number": 12,
             "repositories": ["your-org/your-repo"],
             "status_field": "Status",
+            "status_options": ["Todo", "In Progress", "Rework", "Done", "Closed", "Cancelled"],
             "active_states": ["Todo", "In Progress", "Rework"],
+            "handoff_states": [],
             "terminal_states": ["Done", "Closed", "Cancelled"],
             "priority_field": "Priority",
             "api_base_url": "https://api.github.com",
@@ -214,6 +226,7 @@ def default_app_settings() -> Dict[str, Any]:
         "blocker_policy": {
             "kind": "github_issue_dependencies",
             "unavailable_behavior": "treat_unblocked",
+            "blocked_states": ["Todo"],
         },
         "workspace": {
             "root": "~/code/github-symphony-workspaces",
@@ -252,8 +265,10 @@ def default_app_settings() -> Dict[str, Any]:
             "- 标题：`{{ issue.title }}`\n"
             "- 仓库：`{{ issue.repository }}`\n"
             "- 链接：`{{ issue.url }}`\n\n"
+            "{{ workflow.status_policy_markdown }}\n\n"
             "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。"
-            "完成后请在 GitHub 中留下清晰的工作说明、验证结果和剩余风险。"
+            "完成后请根据上面的阶段策略交接任务，并在 GitHub 中留下清晰的工作说明、"
+            "验证结果和剩余风险。"
         ),
     }
 

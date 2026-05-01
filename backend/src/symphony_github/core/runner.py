@@ -13,6 +13,7 @@ from .config import SymphonyConfig
 from .events import EventStore
 from .models import RunRecord, WorkItem
 from .prompt import render_prompt
+from .state_policy import build_workflow_prompt_context
 from .workspace import WorkspaceManager
 
 
@@ -72,6 +73,7 @@ class AgentRunner:
                 {
                     "issue": item,
                     "tracker": self.config.tracker,
+                    "workflow": build_workflow_prompt_context(self.config),
                     "workspace": workspace,
                     "env": {},
                 },
@@ -142,11 +144,12 @@ class AgentRunner:
         run_record: RunRecord,
     ) -> Optional[str]:
         policy = self.config.completion_policy
-        if not policy.mark_done_after_successful_turn or policy.kind == "none":
+        if not policy.mark_done_after_successful_turn or policy.kind in {"none", "agent_managed"}:
             return None
 
         try:
             # 逻辑说明：只更新 Project item Status，不关闭 Issue、不 merge PR、不 push 代码。
+            # 目标状态可以是 Human Review、Ready for QA、Done 等任意非 active 阶段；
             # 这样能让成功任务离开 active states，从源头阻止下一轮 poll 重复派发。
             await self.tracker.update_project_status(item.project_item_id, policy.success_state)
         except Exception as exc:  # noqa: BLE001 - 完成状态更新失败必须转成可重试 runner 结果。
@@ -201,7 +204,7 @@ class AgentRunner:
         )
 
 
-# 函数说明：判断 Codex turn final_state 是否表示失败或取消，避免把失败 turn 标记为 Done。
+# 函数说明：判断 Codex turn final_state 是否表示失败或取消，避免把失败 turn 移到成功目标阶段。
 def _turn_state_is_failure(final_state: Optional[str]) -> bool:
     if final_state is None:
         return False

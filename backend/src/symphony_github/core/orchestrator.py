@@ -244,7 +244,7 @@ class Orchestrator:
         if len(self.running) + len(self._claimed) >= self.config.agent.max_concurrent_agents:
             self._record_dispatch_skip(item, "concurrency_full")
             return False
-        if _is_blocked_todo(item):
+        if _is_blocked_state(item, self.config.blocker_policy.blocked_states):
             self._record_dispatch_skip(item, "blocked_by_dependency")
             return False
         if not self._retry_ready(item.id):
@@ -331,9 +331,9 @@ class Orchestrator:
         )
 
 
-# 函数说明：判断 Todo 任务是否被未完成依赖阻塞。
-def _is_blocked_todo(item: WorkItem) -> bool:
-    return item.state == "Todo" and (item.blocked_by_open_count or 0) > 0
+# 函数说明：判断当前任务状态是否属于配置的“依赖阻塞适用阶段”。
+def _is_blocked_state(item: WorkItem, blocked_states: List[str]) -> bool:
+    return item.state in set(blocked_states) and (item.blocked_by_open_count or 0) > 0
 
 
 # 函数说明：生成派发排序 key：priority、创建时间、identifier。

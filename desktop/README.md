@@ -40,7 +40,8 @@ npm run package
 - `Dashboard` 展示运行中 agent、候选任务和最近事件。
 - `Settings` 提供 GitHub Project、Workspace、Agent、Completion、Codex、Tools、Logging、Prompt 分区配置。
 - `Settings / GitHub Project` 会从 GitHub 读取 owner、Projects v2、Status 字段、状态选项和 Project 中出现过的仓库，减少手工填写。
-- `Settings / Completion` 默认在 Codex turn 成功后把 GitHub Project item 的 `Status` 更新为 `Done`，防止同一个 `Todo` 任务被重复派发。
+- `Settings / GitHub Project` 支持把任意自定义 Status 选项分配为 Active、Handoff、Terminal 三类阶段。
+- `Settings / Completion` 默认在 Codex turn 成功后把 GitHub Project item 的 `Status` 更新到目标/交接阶段，防止任务仍处于 Active 阶段时被重复派发；也可切换为 `agent_managed` 由 prompt 和 GitHub 工具流转状态。
 - `Settings` 支持导入/导出 `WORKFLOW.md`，导出时只写 `$GITHUB_TOKEN` 占位符。
 - `Logs` 展示持久 JSONL 日志、日志目录、过滤器和诊断包导出入口。
 - `Help` 提供面向普通开发者的使用说明、GitHub Project 概念和排错指南。

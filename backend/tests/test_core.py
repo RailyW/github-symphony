@@ -26,6 +26,7 @@ from symphony_github.core.settings import (
     import_workflow_text,
     normalize_app_settings,
 )
+from symphony_github.core.state_policy import build_workflow_prompt_context
 from symphony_github.core.workflow import load_workflow
 from symphony_github.integrations.github.client import GitHubClient
 from symphony_github.integrations.github.discovery import GitHubDiscoveryService
@@ -226,6 +227,159 @@ Prompt body
         self.assertEqual(document.config.agent.max_concurrent_agents, 3)
         self.assertEqual(document.config.completion_policy.success_state, "Done")
         self.assertEqual(document.config.logging.level, "DEBUG")
+
+    # 函数说明：测试自定义 Project 阶段可导入、归一化和导出，且成功目标不必属于 terminal。
+    def test_custom_status_policy_allows_handoff_success_state(self) -> None:
+        imported = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo]
+  status_options: [Backlog, Ready, Coding, Human Review, Rework, Shipped]
+  active_states: [Ready, Coding, Rework]
+  handoff_states: [Human Review]
+  terminal_states: [Shipped]
+workspace:
+  root: /tmp/github-symphony-test
+blocker_policy:
+  kind: github_issue_dependencies
+  unavailable_behavior: treat_unblocked
+  blocked_states: [Ready]
+completion_policy:
+  kind: update_project_status
+  success_state: Human Review
+  failure_state: Rework
+---
+{{ workflow.status_policy_markdown }}
+"""
+        )
+
+        document = normalize_app_settings(imported.settings, github_token="token")
+        config = document.config
+
+        self.assertEqual(config.tracker.status_options[3], "Human Review")
+        self.assertEqual(config.tracker.handoff_states, ["Human Review"])
+        self.assertEqual(config.blocker_policy.blocked_states, ["Ready"])
+        self.assertEqual(config.completion_policy.success_state, "Human Review")
+        exported = export_workflow_text(document.settings)
+        self.assertIn("handoff_states", exported)
+        self.assertIn("success_state: Human Review", exported)
+
+    # 函数说明：测试自动完成目标不能仍处于 active，否则会造成成功后重复派发。
+    def test_completion_target_cannot_be_active_when_app_updates_status(self) -> None:
+        with self.assertRaisesRegex(ValueError, "success_state"):
+            build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "status_options": ["Ready", "Human Review", "Shipped"],
+                        "active_states": ["Ready"],
+                        "terminal_states": ["Shipped"],
+                    },
+                    "workspace": {"root": "/tmp/github-symphony-test"},
+                    "completion_policy": {
+                        "kind": "update_project_status",
+                        "success_state": "Ready",
+                    },
+                }
+            )
+
+    # 函数说明：测试阶段角色互斥，避免同一个状态既被派发又被视为交接。
+    def test_status_roles_cannot_overlap(self) -> None:
+        with self.assertRaisesRegex(ValueError, "handoff_states"):
+            build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "status_options": ["Ready", "Human Review", "Shipped"],
+                        "active_states": ["Ready", "Human Review"],
+                        "handoff_states": ["Human Review"],
+                        "terminal_states": ["Shipped"],
+                    },
+                    "workspace": {"root": "/tmp/github-symphony-test"},
+                }
+            )
+
+    # 函数说明：测试已知 status_options 时拼错的阶段会被明确拒绝。
+    def test_unknown_state_fails_when_status_options_known(self) -> None:
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "status_options": ["Ready", "Human Review", "Shipped"],
+                        "active_states": ["Ready"],
+                        "terminal_states": ["Shipped"],
+                    },
+                    "workspace": {"root": "/tmp/github-symphony-test"},
+                    "blocker_policy": {"blocked_states": ["Typo"]},
+                }
+            )
+
+    # 函数说明：测试没有 status_options 时仍兼容旧 WORKFLOW 中的任意状态名。
+    def test_unknown_state_is_allowed_without_status_options(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "active_states": ["Ready"],
+                    "terminal_states": ["Shipped"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "blocker_policy": {"blocked_states": ["Ready"]},
+                "completion_policy": {"success_state": "Human Review"},
+            }
+        )
+
+        self.assertEqual(config.completion_policy.success_state, "Human Review")
+
+    # 函数说明：测试 prompt 阶段策略上下文可渲染给 agent 使用。
+    def test_prompt_context_includes_workflow_status_policy(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "status_options": ["Ready", "Human Review", "Shipped"],
+                    "active_states": ["Ready"],
+                    "handoff_states": ["Human Review"],
+                    "terminal_states": ["Shipped"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "completion_policy": {"success_state": "Human Review"},
+            }
+        )
+        workflow = build_workflow_prompt_context(config)
+
+        rendered = render_prompt(
+            "{{ workflow.success_state }}\n{{ workflow.status_policy_markdown }}",
+            {"workflow": workflow},
+        )
+
+        self.assertIn("Human Review", rendered)
+        self.assertIn("active 阶段", rendered)
 
     # 函数说明：测试 REST 工具拒绝配置仓库之外的路径。
     async def test_rest_path_must_be_allowlisted(self) -> None:
@@ -601,6 +755,102 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    # 函数说明：测试成功 turn 可更新到非 terminal 的 handoff 状态，并通过 prompt 告知 agent。
+    async def test_successful_turn_can_move_to_handoff_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "api_token": "fake-token",
+                        "status_options": ["Ready", "Human Review", "Shipped"],
+                        "active_states": ["Ready"],
+                        "handoff_states": ["Human Review"],
+                        "terminal_states": ["Shipped"],
+                    },
+                    "workspace": {"root": tmp},
+                    "completion_policy": {
+                        "kind": "update_project_status",
+                        "success_state": "Human Review",
+                        "mark_done_after_successful_turn": True,
+                    },
+                }
+            )
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            item.state = "Ready"
+            tracker = FakeTracker([item])
+            fake_codex = FakeCodexClient()
+            runner = FakeAgentRunnerWithCodex(
+                config=config,
+                prompt_template="{{ workflow.status_policy_markdown }}",
+                tracker=tracker,
+                events=EventStore(),
+                fake_codex=fake_codex,
+            )
+            run_record = RunRecord(
+                issue_id=item.id,
+                identifier=item.identifier,
+                state="running",
+                workspace="",
+            )
+
+            result = await runner.run(item, run_record)
+
+            self.assertFalse(result.should_continue)
+            self.assertEqual(item.state, "Human Review")
+            self.assertEqual(tracker.status_updates, [(item.project_item_id, "Human Review")])
+            self.assertIn("Human Review", fake_codex.prompts[0])
+
+    # 函数说明：测试 agent_managed 完成策略不会由 App 自动写 Project Status。
+    async def test_agent_managed_completion_does_not_update_project_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "api_token": "fake-token",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": tmp},
+                    "agent": {"max_turns": 1},
+                    "completion_policy": {
+                        "kind": "agent_managed",
+                        "success_state": "Done",
+                        "mark_done_after_successful_turn": True,
+                    },
+                }
+            )
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            tracker = FakeTracker([item])
+            runner = FakeAgentRunnerWithCodex(
+                config=config,
+                prompt_template="{{ workflow.completion_kind }}",
+                tracker=tracker,
+                events=EventStore(),
+                fake_codex=FakeCodexClient(),
+            )
+            run_record = RunRecord(
+                issue_id=item.id,
+                identifier=item.identifier,
+                state="running",
+                workspace="",
+            )
+
+            result = await runner.run(item, run_record)
+
+            self.assertFalse(result.should_continue)
+            self.assertEqual(item.state, "Todo")
+            self.assertEqual(tracker.status_updates, [])
+
     # 函数说明：测试 Project Status 更新失败会标记 run failed，并交给调度器重试。
     async def test_completion_status_update_failure_requests_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -687,6 +937,48 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("I_2", orchestrator.running)
         self.assertNotIn("I_1", orchestrator.running)
+        release.set()
+        await asyncio.sleep(0)
+
+    # 函数说明：测试 blocked_states 可配置；只有指定阶段会因为 dependencies 被跳过。
+    async def test_dispatch_uses_configured_blocked_states(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "api_token": "fake-token",
+                    "status_options": ["Ready", "Coding", "Human Review", "Shipped"],
+                    "active_states": ["Ready", "Coding"],
+                    "handoff_states": ["Human Review"],
+                    "terminal_states": ["Shipped"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "blocker_policy": {"blocked_states": ["Ready"]},
+                "agent": {"max_concurrent_agents": 2},
+                "completion_policy": {"success_state": "Human Review"},
+            }
+        )
+        ready = _item("I_1", "acme/demo#1", blocked_by_open_count=1)
+        ready.state = "Ready"
+        coding = _item("I_2", "acme/demo#2", blocked_by_open_count=1)
+        coding.state = "Coding"
+        release = asyncio.Event()
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_template="",
+            tracker=FakeTracker([ready, coding]),
+            runner_factory=lambda: FakeRunner(release),
+            events=EventStore(),
+        )
+
+        await orchestrator.poll_once()
+
+        self.assertNotIn("I_1", orchestrator.running)
+        self.assertIn("I_2", orchestrator.running)
         release.set()
         await asyncio.sleep(0)
 

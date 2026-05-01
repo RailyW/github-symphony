@@ -19,7 +19,9 @@ class TrackerConfig:
     repositories: List[str]
     api_token: Optional[str]
     status_field: str = "Status"
+    status_options: List[str] = field(default_factory=list)
     active_states: List[str] = field(default_factory=lambda: ["Todo", "In Progress"])
+    handoff_states: List[str] = field(default_factory=list)
     terminal_states: List[str] = field(
         default_factory=lambda: ["Done", "Closed", "Cancelled"]
     )
@@ -34,6 +36,7 @@ class BlockerPolicyConfig:
 
     kind: str = "github_issue_dependencies"
     unavailable_behavior: str = "treat_unblocked"
+    blocked_states: List[str] = field(default_factory=lambda: ["Todo"])
 
 
 @dataclass
@@ -151,9 +154,17 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
             tracker_raw.get("api_token") or os.environ.get("GITHUB_TOKEN")
         ),
         status_field=str(tracker_raw.get("status_field") or "Status"),
+        status_options=_optional_string_list(
+            tracker_raw.get("status_options"),
+            "tracker.status_options",
+        ),
         active_states=_string_list(
             tracker_raw.get("active_states", ["Todo", "In Progress"]),
             "tracker.active_states",
+        ),
+        handoff_states=_optional_string_list(
+            tracker_raw.get("handoff_states"),
+            "tracker.handoff_states",
         ),
         terminal_states=_string_list(
             tracker_raw.get("terminal_states", ["Done", "Closed", "Cancelled"]),
@@ -165,13 +176,13 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
     )
     _validate_tracker(tracker)
 
-    blocker_policy = _build_blocker_policy(raw.get("blocker_policy"))
+    blocker_policy = _build_blocker_policy(raw.get("blocker_policy"), tracker)
     workspace = _build_workspace(workspace_raw, workflow_path)
     agent = _build_agent(raw.get("agent"))
     codex = _build_codex(raw.get("codex"))
     tools = _build_tools(raw.get("tools"))
-    completion_policy = _build_completion_policy(raw.get("completion_policy"))
-    _validate_completion_policy(completion_policy, tracker)
+    completion_policy = _build_completion_policy(raw.get("completion_policy"), tracker)
+    _validate_status_policy(tracker, blocker_policy, completion_policy)
     logging = _build_logging(raw.get("logging"))
     _validate_logging_level(logging.level)
 
@@ -189,11 +200,17 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
 
 
 # 函数说明：构建阻塞策略配置，缺失时使用 GitHub issue dependencies。
-def _build_blocker_policy(raw: Any) -> BlockerPolicyConfig:
+def _build_blocker_policy(raw: Any, tracker: TrackerConfig) -> BlockerPolicyConfig:
     mapping = raw if isinstance(raw, dict) else {}
+    blocked_states_raw = mapping.get("blocked_states")
     return BlockerPolicyConfig(
         kind=str(mapping.get("kind") or "github_issue_dependencies"),
         unavailable_behavior=str(mapping.get("unavailable_behavior") or "treat_unblocked"),
+        blocked_states=(
+            _optional_string_list(blocked_states_raw, "blocker_policy.blocked_states")
+            if blocked_states_raw is not None
+            else _default_blocked_states(tracker)
+        ),
     )
 
 
@@ -253,12 +270,20 @@ def _build_tools(raw: Any) -> ToolsConfig:
 
 
 # 函数说明：构建 Codex turn 成功后的 Project 完成策略。
-def _build_completion_policy(raw: Any) -> CompletionPolicyConfig:
+def _build_completion_policy(raw: Any, tracker: TrackerConfig) -> CompletionPolicyConfig:
     mapping = raw if isinstance(raw, dict) else {}
+    success_state = (
+        _optional_string(mapping.get("success_state")) or _default_success_state(tracker)
+    )
+    failure_state = (
+        _optional_string(mapping.get("failure_state"))
+        if "failure_state" in mapping
+        else _default_failure_state(tracker)
+    )
     return CompletionPolicyConfig(
         kind=str(mapping.get("kind") or "update_project_status"),
-        success_state=str(mapping.get("success_state") or "Done").strip(),
-        failure_state=_optional_string(mapping.get("failure_state", "Rework")),
+        success_state=success_state,
+        failure_state=failure_state,
         mark_done_after_successful_turn=bool(
             mapping.get("mark_done_after_successful_turn", True)
         ),
@@ -298,29 +323,81 @@ def _validate_tracker(tracker: TrackerConfig) -> None:
     if not tracker.terminal_states:
         raise ValueError("tracker.terminal_states 不能为空")
 
+    _validate_unique_strings(tracker.status_options, "tracker.status_options")
+    _validate_unique_strings(tracker.active_states, "tracker.active_states")
+    _validate_unique_strings(tracker.handoff_states, "tracker.handoff_states")
+    _validate_unique_strings(tracker.terminal_states, "tracker.terminal_states")
 
-# 函数说明：校验完成策略，避免成功状态仍在 active states 中导致重复派发。
+
+# 函数说明：统一校验 GitHub Project Status 的角色分组和依赖完成策略。
+def _validate_status_policy(
+    tracker: TrackerConfig,
+    blocker: BlockerPolicyConfig,
+    completion: CompletionPolicyConfig,
+) -> None:
+    # 逻辑说明：active、handoff、terminal 是互斥角色；同一状态跨角色会让调度器
+    # 无法判断它到底应该继续派发、等待人工，还是执行终态清理。
+    _raise_if_overlap(
+        tracker.active_states,
+        tracker.terminal_states,
+        "tracker.active_states",
+        "tracker.terminal_states",
+    )
+    _raise_if_overlap(
+        tracker.active_states,
+        tracker.handoff_states,
+        "tracker.active_states",
+        "tracker.handoff_states",
+    )
+    _raise_if_overlap(
+        tracker.handoff_states,
+        tracker.terminal_states,
+        "tracker.handoff_states",
+        "tracker.terminal_states",
+    )
+    _validate_unique_strings(blocker.blocked_states, "blocker_policy.blocked_states")
+    _validate_completion_policy(completion, tracker)
+
+    # 逻辑说明：status_options 来自 GitHub discovery，是 UI/校验/prompt 的缓存。
+    # 一旦已知，就主动拦截拼写错误；为空时保持旧 WORKFLOW.md 的自由配置兼容。
+    if not tracker.status_options:
+        return
+
+    known = set(tracker.status_options)
+    _validate_states_are_known(tracker.active_states, known, "tracker.active_states")
+    _validate_states_are_known(tracker.handoff_states, known, "tracker.handoff_states")
+    _validate_states_are_known(tracker.terminal_states, known, "tracker.terminal_states")
+    _validate_states_are_known(blocker.blocked_states, known, "blocker_policy.blocked_states")
+    _validate_states_are_known([completion.success_state], known, "completion_policy.success_state")
+    if completion.failure_state:
+        _validate_states_are_known(
+            [completion.failure_state],
+            known,
+            "completion_policy.failure_state",
+        )
+
+
+# 函数说明：校验完成策略，避免应用托管完成时目标状态仍在 active states 中导致重复派发。
 def _validate_completion_policy(
     policy: CompletionPolicyConfig,
     tracker: TrackerConfig,
 ) -> None:
-    if policy.kind not in {"update_project_status", "none"}:
-        raise ValueError("completion_policy.kind 目前只支持 update_project_status 或 none")
+    if policy.kind not in {"update_project_status", "agent_managed", "none"}:
+        raise ValueError(
+            "completion_policy.kind 目前只支持 update_project_status、agent_managed 或 none"
+        )
 
     if not policy.success_state:
         raise ValueError("completion_policy.success_state 不能为空")
 
-    # 逻辑说明：自动完成的目标状态必须脱离 active states，否则成功 turn 后仍会被调度器再次派发。
-    if policy.mark_done_after_successful_turn and policy.success_state in tracker.active_states:
-        raise ValueError("completion_policy.success_state 不能同时出现在 tracker.active_states")
-
-    # 逻辑说明：终态集合是调度器和用户理解“已完成”的共同边界，默认要求成功状态属于终态。
+    # 逻辑说明：只有应用负责更新 Project Status 时，目标状态才必须脱离 active states。
+    # agent_managed/none 允许用户在 prompt 中自行设计 continuation 行为。
     if (
-        policy.mark_done_after_successful_turn
-        and policy.kind == "update_project_status"
-        and policy.success_state not in tracker.terminal_states
+        policy.kind == "update_project_status"
+        and policy.mark_done_after_successful_turn
+        and policy.success_state in tracker.active_states
     ):
-        raise ValueError("completion_policy.success_state 必须包含在 tracker.terminal_states")
+        raise ValueError("completion_policy.success_state 不能同时出现在 tracker.active_states")
 
 
 # 函数说明：校验日志级别，防止拼写错误导致日志静默。
@@ -358,6 +435,17 @@ def _optional_string(value: Any) -> Optional[str]:
     return text or None
 
 
+# 函数说明：解析可选字符串列表；字段缺失或为空时返回空列表，用于兼容旧配置。
+def _optional_string_list(value: Any, name: str) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str) and not value.strip():
+        return []
+    if isinstance(value, list) and not value:
+        return []
+    return _string_list(value, name)
+
+
 # 函数说明：解析字符串列表，支持 YAML 列表和逗号分隔字符串两种形式。
 def _string_list(value: Any, name: str) -> List[str]:
     if isinstance(value, str):
@@ -371,6 +459,65 @@ def _string_list(value: Any, name: str) -> List[str]:
     if not result:
         raise ValueError(f"{name} 不能为空")
     return result
+
+
+# 函数说明：计算旧配置缺少 blocked_states 时的兼容默认值。
+def _default_blocked_states(tracker: TrackerConfig) -> List[str]:
+    # 逻辑说明：历史版本只阻塞 Todo；如果 discovery 显示 Project 没有 Todo，
+    # 则退到第一个 active state，覆盖 Ready/Backlog 等自定义排队阶段。
+    if not tracker.status_options or "Todo" in tracker.status_options:
+        return ["Todo"]
+    return tracker.active_states[:1]
+
+
+# 函数说明：根据已发现阶段推断默认成功目标，避免固定依赖 Done。
+def _default_success_state(tracker: TrackerConfig) -> str:
+    if not tracker.status_options:
+        return "Done"
+    if "Done" in tracker.status_options and "Done" not in tracker.active_states:
+        return "Done"
+    if tracker.handoff_states:
+        return tracker.handoff_states[0]
+    if tracker.terminal_states:
+        return tracker.terminal_states[0]
+
+    # 逻辑说明：极端情况下 terminal 为空会在 tracker 校验中失败；这里仍保留兜底，
+    # 让错误信息尽量来自统一校验而不是索引异常。
+    non_active = [state for state in tracker.status_options if state not in tracker.active_states]
+    return non_active[-1] if non_active else tracker.status_options[-1]
+
+
+# 函数说明：根据已发现阶段推断默认失败/返工目标，找不到 Rework 时保持未配置。
+def _default_failure_state(tracker: TrackerConfig) -> Optional[str]:
+    if not tracker.status_options:
+        return "Rework"
+    return "Rework" if "Rework" in tracker.status_options else None
+
+
+# 函数说明：校验字符串列表内没有重复值。
+def _validate_unique_strings(values: List[str], name: str) -> None:
+    seen: set[str] = set()
+    duplicates: List[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
+    if duplicates:
+        raise ValueError(f"{name} 不能包含重复值：{', '.join(duplicates)}")
+
+
+# 函数说明：校验两个状态角色集合没有交集。
+def _raise_if_overlap(left: List[str], right: List[str], left_name: str, right_name: str) -> None:
+    overlap = sorted(set(left) & set(right))
+    if overlap:
+        raise ValueError(f"{left_name} 与 {right_name} 不能重叠：{', '.join(overlap)}")
+
+
+# 函数说明：在已发现 GitHub Status options 时，校验配置状态名都来自 Project。
+def _validate_states_are_known(values: List[str], known: set[str], name: str) -> None:
+    unknown = [value for value in values if value not in known]
+    if unknown:
+        raise ValueError(f"{name} 包含 Project Status 中不存在的状态：{', '.join(unknown)}")
 
 
 # 函数说明：展开普通字符串中的 `~` 和 `$VAR`。
