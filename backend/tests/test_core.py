@@ -447,6 +447,7 @@ class FakeProjectClient(GitHubClient):
     def __init__(self) -> None:
         super().__init__(token="fake")
         self.mutation_variables = None
+        self.rest_paths: list[str] = []
 
     # 函数说明：根据 query 名称返回 fields、items 或 mutation 响应。
     async def graphql(self, query: str, variables: Dict | None = None) -> Dict:
@@ -467,6 +468,7 @@ class FakeProjectClient(GitHubClient):
         query: Dict | None = None,
         body: Dict | None = None,
     ):
+        self.rest_paths.append(path)
         if path.endswith("/issues/2/dependencies/blocked_by"):
             return [{"state": "open"}]
         return []
@@ -492,10 +494,11 @@ class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
                 "workspace": {"root": "/tmp/github-symphony-test"},
             }
         )
+        client = FakeProjectClient()
         tracker = GitHubProjectsV2Tracker(
             config.tracker,
             config.blocker_policy,
-            FakeProjectClient(),
+            client,
             EventStore(),
         )
 
@@ -504,6 +507,37 @@ class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.identifier for item in items], ["acme/demo#2"])
         self.assertEqual(items[0].blocked_by_open_count, 1)
         self.assertEqual(items[0].priority, 2.0)
+        self.assertEqual(client.rest_paths, ["/repos/acme/demo/issues/2/dependencies/blocked_by"])
+
+    # 函数说明：测试运行中任务状态回查不会额外读取 dependencies。
+    async def test_fetch_issue_states_by_ids_skips_dependency_lookup(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "active_states": ["Todo"],
+                    "terminal_states": ["Done"],
+                    "priority_field": "Priority",
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        client = FakeProjectClient()
+        tracker = GitHubProjectsV2Tracker(
+            config.tracker,
+            config.blocker_policy,
+            client,
+            EventStore(),
+        )
+
+        states = await tracker.fetch_issue_states_by_ids(["I_1"])
+
+        self.assertEqual(states["I_1"].state, "Done")
+        self.assertEqual(client.rest_paths, [])
 
     # 函数说明：测试 Status 名称能解析成 single-select option id 并生成 mutation。
     async def test_update_project_status_resolves_option(self) -> None:

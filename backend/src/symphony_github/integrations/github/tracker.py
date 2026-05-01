@@ -24,6 +24,14 @@ class ProjectFieldCache:
     priority_field_name: Optional[str]
 
 
+@dataclass
+class ProjectItemsFetchResult:
+    """Project item 读取结果。"""
+
+    items: list[WorkItem]
+    total_items: int
+
+
 class GitHubProjectsV2Tracker:
     """基于 GitHub Projects v2 的 tracker 实现。"""
 
@@ -51,24 +59,26 @@ class GitHubProjectsV2Tracker:
 
     # 函数说明：读取指定 Project Status 状态集合下的任务。
     async def fetch_issues_by_states(self, state_names: Sequence[str]) -> List[WorkItem]:
-        items = await self._fetch_project_items()
-        allowed = set(state_names)
-        filtered = [item for item in items if item.state in allowed]
+        allowed_states = set(state_names)
+        result = await self._fetch_project_items(allowed_states=allowed_states)
         self._debug(
             "GitHub Project 状态过滤完成",
             {
                 "states": list(state_names),
-                "total_items": len(items),
-                "matched_items": len(filtered),
+                "total_items": result.total_items,
+                "matched_items": len(result.items),
             },
         )
-        return filtered
+        return result.items
 
     # 函数说明：刷新指定任务 ID 的状态；为了简单可靠，v1 通过重新读取 project items 完成。
     async def fetch_issue_states_by_ids(self, issue_ids: Iterable[str]) -> Dict[str, WorkItem]:
         wanted = set(issue_ids)
-        items = await self._fetch_project_items()
-        return {item.id: item for item in items if item.id in wanted}
+        result = await self._fetch_project_items(
+            include_blockers=False,
+            wanted_issue_ids=wanted,
+        )
+        return {item.id: item for item in result.items}
 
     # 函数说明：更新 Project v2 Status 字段，供测试和未来 UI 操作用。
     async def update_project_status(self, project_item_id: str, state_name: str) -> Dict[str, Any]:
@@ -90,10 +100,16 @@ class GitHubProjectsV2Tracker:
         )
         return result
 
-    # 函数说明：读取并归一化 Project v2 全部 item，内部处理分页。
-    async def _fetch_project_items(self) -> List[WorkItem]:
+    # 函数说明：读取并归一化 Project v2 item，内部处理分页和预过滤条件。
+    async def _fetch_project_items(
+        self,
+        allowed_states: set[str] | None = None,
+        include_blockers: bool = True,
+        wanted_issue_ids: set[str] | None = None,
+    ) -> ProjectItemsFetchResult:
         field_cache = await self._get_field_cache()
         items: List[WorkItem] = []
+        total_items = 0
         after: Optional[str] = None
 
         while True:
@@ -109,9 +125,32 @@ class GitHubProjectsV2Tracker:
             )
             project = _project_from_payload(payload, self.config.owner_type)
             nodes = project["items"]["nodes"] or []
+            total_items += len(nodes)
 
             for node in nodes:
-                normalized = await self._normalize_project_item(node, field_cache)
+                # 逻辑说明：状态过滤必须早于完整归一化和 dependencies 查询。
+                # 非目标状态不会被派发，提前跳过可避免每轮 poll 对 Done/Handoff
+                # 项发起 REST 请求。
+                if allowed_states is not None:
+                    status_name = _status_name_from_project_item(node)
+                    if status_name is None or status_name not in allowed_states:
+                        continue
+
+                # 逻辑说明：状态回查只关心指定 Issue/PR，先按内容 ID 缩小范围。
+                # 这能避免当前运行很少但 Project 很大时归一化大量无关 item。
+                if wanted_issue_ids is not None:
+                    content = node.get("content")
+                    if (
+                        not isinstance(content, dict)
+                        or str(content.get("id")) not in wanted_issue_ids
+                    ):
+                        continue
+
+                normalized = await self._normalize_project_item(
+                    node,
+                    field_cache,
+                    include_blockers=include_blockers,
+                )
                 if normalized is not None:
                     items.append(normalized)
 
@@ -120,13 +159,14 @@ class GitHubProjectsV2Tracker:
                 break
             after = page_info.get("endCursor")
 
-        return items
+        return ProjectItemsFetchResult(items=items, total_items=total_items)
 
     # 函数说明：把单个 Project item 转成 WorkItem；draft item 和不支持内容会被忽略。
     async def _normalize_project_item(
         self,
         node: Dict[str, Any],
         field_cache: ProjectFieldCache,
+        include_blockers: bool = True,
     ) -> Optional[WorkItem]:
         if node.get("isArchived"):
             return None
@@ -168,8 +208,10 @@ class GitHubProjectsV2Tracker:
             priority=priority,
         )
 
-        # 逻辑说明：只对 Issue/PR REST issue_number 都可用的内容尝试读取 dependencies。
-        item.blocked_by_open_count = await self._blocked_by_open_count(item)
+        # 逻辑说明：只有候选派发路径需要 dependencies 参与阻塞判断；
+        # 状态回查等路径只需要 state。
+        if include_blockers:
+            item.blocked_by_open_count = await self._blocked_by_open_count(item)
         return item
 
     # 函数说明：读取 GitHub issue dependencies；不可用时根据配置降级。
@@ -376,6 +418,15 @@ def _find_status_field(fields: List[Dict[str, Any]], field_name: str) -> Dict[st
         if field.get("name") == field_name and field.get("options") is not None:
             return field
     raise ValueError(f"Project v2 中找不到 single-select 字段：{field_name}")
+
+
+# 函数说明：从 Project item 节点中读取 Status single-select 名称。
+def _status_name_from_project_item(node: dict[str, Any]) -> str | None:
+    status_value = node.get("statusValue")
+    if not isinstance(status_value, dict):
+        return None
+    name = status_value.get("name")
+    return str(name) if name else None
 
 
 # 函数说明：从 Project priority 字段值中提取可排序数字。
