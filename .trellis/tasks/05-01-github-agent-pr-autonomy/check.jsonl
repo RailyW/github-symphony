@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/shared/index.md", "reason": "Shared code quality and project lineage verification."}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Mandatory code quality verification."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend runtime/config/tooling verification."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify structured failures and no silent runtime errors."}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Verify token handling and diagnostics do not leak secrets."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Verify desktop Settings/Help behavior."}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Verify frontend quality constraints."}
+{"file": ".trellis/tasks/05-01-github-agent-pr-autonomy/research/upstream-symphony-autonomy.md", "reason": "Verify implemented behavior matches upstream autonomy research."}

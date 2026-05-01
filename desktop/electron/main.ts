@@ -13,6 +13,66 @@ const externalApiBaseUrl = process.env.SYMPHONY_API_BASE_URL;
 const SETTINGS_FILE_NAME = "settings.json";
 const SECRETS_FILE_NAME = "secrets.json";
 const ELECTRON_LOG_FILE_NAME = "electron-main.jsonl";
+const DEFAULT_STATUS_OPTIONS = [
+  "Todo",
+  "In Progress",
+  "Rework",
+  "Human Review",
+  "Merging",
+  "Done",
+  "Closed",
+  "Cancelled",
+];
+const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress", "Rework", "Merging"];
+const DEFAULT_HANDOFF_STATES = ["Human Review"];
+const DEFAULT_TERMINAL_STATES = ["Done", "Closed", "Cancelled"];
+const FALLBACK_PROMPT_TEMPLATE = [
+  "你正在处理 GitHub 任务：",
+  "",
+  "- 标识：`{{ issue.identifier }}`",
+  "- 标题：`{{ issue.title }}`",
+  "- 仓库：`{{ issue.repository }}`",
+  "- 链接：`{{ issue.url }}`",
+  "",
+  "{{ workflow.status_policy_markdown }}",
+  "",
+  "## 默认自治边界：PR 前全自动",
+  "",
+  "你在隔离工作区内执行完整实现循环。调度器只负责派发任务、准备工作区、注入 GitHub 工具和记录事件；代码流转动作由你根据本 prompt、token 权限、GitHub tools 模式和 Project Status 执行。",
+  "",
+  "### 通用规则",
+  "",
+  "1. 先读取 issue/PR 描述、现有评论、关联 PR 和仓库代码，再开始修改。",
+  "2. 使用单个 issue comment 作为 `## Codex Workpad`。如果已存在 Workpad，就更新它；不要新建多个进度评论。",
+  "3. Workpad 至少记录：当前计划、实现摘要、验证命令与结果、PR 链接、未处理风险或阻塞。",
+  "4. 除非遇到缺失权限、缺失 secret、仓库无法访问等真实外部阻塞，否则不要在 active 状态下结束 turn。",
+  "5. 失败或需要返工时，把 Project Status 移到 `{{ workflow.failure_state }}`，并在 Workpad 写清楚原因和下一步。",
+  "",
+  "### 状态流转",
+  "",
+  "- `Todo`：先使用 GitHub 工具把 Project Status 移到 `In Progress`，然后创建或更新 `## Codex Workpad`，再开始复现、计划和实现。",
+  "- `In Progress` / `Rework`：完成复现、计划、实现和验证。创建或复用任务分支，保持分支基于最新默认分支；按逻辑提交 commit，push 到远端，并创建或更新一个 PR。",
+  "- PR 前置门禁：验收项完成；必要验证已运行并记录；最新 pushed commit 的 checks 为 green；PR 已链接到当前 issue；PR feedback sweep 没有未处理的 actionable comments；Workpad 已记录验证结果、PR 链接和剩余风险。",
+  "- `Human Review`：这是非 active 交接状态。不要继续改代码，不要自行 merge；等待人工审批或把状态移到 `Rework` / `Merging`。",
+  "- `Merging`：这是 active land 状态。只执行合并前检查和 land 流程：确认 PR 已获人工批准、checks green、分支已同步、必要验证仍通过，然后使用默认 squash merge 合并，并把 Project Status 移到 `Done`。",
+  "",
+  "### PR feedback sweep",
+  "",
+  "在进入 `Human Review` 前必须检查并处理：",
+  "",
+  "- PR 顶层评论、review summary、inline comments、requested changes。",
+  "- CI/checks/Actions 的最新状态和失败日志。",
+  "- 新反馈处理后必须重新验证、commit、push，并再次确认 checks green。",
+  "- 对非 actionable 或不同意的反馈，要在 PR 或 Workpad 中给出简短理由。",
+  "",
+  "### 禁止事项",
+  "",
+  "- 不要 force push。",
+  "- 不要直接修改或 push 到 `main` / 默认分支。",
+  "- 不要删除远端分支。",
+  "- 不要使用 PR body closing keywords 自动关闭 issue，也不要自动关闭 issue；任务结束以 GitHub Project Status `Done` 为准。",
+  "- 不要扩大 scope；发现有价值但超出本 issue 的工作时，在 Workpad 记录为 follow-up。",
+].join("\n");
 
 type TokenUpdate =
   | { mode: "unchanged" }
@@ -163,10 +223,10 @@ function defaultSettings(): Record<string, unknown> {
       project_number: 12,
       repositories: ["your-org/your-repo"],
       status_field: "Status",
-      status_options: ["Todo", "In Progress", "Rework", "Done", "Closed", "Cancelled"],
-      active_states: ["Todo", "In Progress", "Rework"],
-      handoff_states: [],
-      terminal_states: ["Done", "Closed", "Cancelled"],
+      status_options: [...DEFAULT_STATUS_OPTIONS],
+      active_states: [...DEFAULT_ACTIVE_STATES],
+      handoff_states: [...DEFAULT_HANDOFF_STATES],
+      terminal_states: [...DEFAULT_TERMINAL_STATES],
       priority_field: "Priority",
       api_base_url: "https://api.github.com",
       graphql_url: "https://api.github.com/graphql",
@@ -212,10 +272,10 @@ function defaultSettings(): Record<string, unknown> {
       },
     },
     completion_policy: {
-      kind: "update_project_status",
-      success_state: "Done",
+      kind: "agent_managed",
+      success_state: "Human Review",
       failure_state: "Rework",
-      mark_done_after_successful_turn: true,
+      mark_done_after_successful_turn: false,
       close_issue: false,
     },
     logging: {
@@ -296,18 +356,7 @@ function readBundledPromptTemplate(): string {
     // 逻辑说明：打包资源缺失不应阻止 App 启动，下面返回内置最小 prompt。
   }
 
-  return [
-    "你正在处理 GitHub 任务：",
-    "",
-    "- 标识：`{{ issue.identifier }}`",
-    "- 标题：`{{ issue.title }}`",
-    "- 仓库：`{{ issue.repository }}`",
-    "- 链接：`{{ issue.url }}`",
-    "",
-    "{{ workflow.status_policy_markdown }}",
-    "",
-    "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。完成后请根据阶段策略交接任务。",
-  ].join("\n");
+  return FALLBACK_PROMPT_TEMPLATE;
 }
 
 // 函数说明：读取本地 settings；首次启动时写入默认设置，形成 App 内配置来源。

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from symphony_github.core.config import CodexConfig
+from symphony_github.core.diagnostics import redact_text
 from symphony_github.core.events import EventStore
 
 DynamicToolExecutor = Callable[[str, Any], Awaitable[Dict[str, Any]]]
@@ -34,18 +35,20 @@ class TurnResult:
 class CodexAppServerClient:
     """最小 Codex app-server 客户端。"""
 
-    # 函数说明：保存 Codex 配置、工作区、事件流和动态工具执行器。
+    # 函数说明：保存 Codex 配置、工作区、事件流、GitHub token 和动态工具执行器。
     def __init__(
         self,
         config: CodexConfig,
         workspace: str,
         events: EventStore,
+        github_token: Optional[str] = None,
         dynamic_tool_specs: Optional[list] = None,
         dynamic_tool_executor: Optional[DynamicToolExecutor] = None,
     ) -> None:
         self.config = config
         self.workspace = str(Path(workspace).resolve())
         self.events = events
+        self.github_token = github_token
         self.dynamic_tool_specs = dynamic_tool_specs or []
         self.dynamic_tool_executor = dynamic_tool_executor
         self.process: Optional[Process] = None
@@ -73,7 +76,7 @@ class CodexAppServerClient:
             stdin=PIPE,
             stdout=PIPE,
             stderr=PIPE,
-            env=codex_subprocess_env(),
+            env=codex_subprocess_env(self.github_token),
         )
         self._reader_task = asyncio.create_task(self._read_stdout_loop())
         self._stderr_task = asyncio.create_task(self._read_stderr_loop())
@@ -271,7 +274,23 @@ class CodexAppServerClient:
                 ],
             }
         else:
-            result = await self.dynamic_tool_executor(str(tool), arguments)
+            try:
+                result = await self.dynamic_tool_executor(str(tool), arguments)
+            except Exception as exc:  # noqa: BLE001 - app-server 边界必须把工具异常转成响应。
+                # 逻辑说明：动态工具内部通常会自行返回结构化失败；这里兜底保护
+                # stdout 读取循环，避免某个工具 bug 让整个 Codex 会话失去响应。
+                result = {
+                    "success": False,
+                    "contentItems": [
+                        {
+                            "type": "inputText",
+                            "text": json.dumps(
+                                {"error": f"Dynamic tool failed: {redact_text(str(exc))}"},
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ],
+                }
 
         self.events.append(
             "codex.dynamic_tool.called",
@@ -280,16 +299,28 @@ class CodexAppServerClient:
         )
         await self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
 
-    # 函数说明：处理 approval、MCP elicitation 和 request_user_input 请求，默认拒绝或返回空输入。
+    # 函数说明：处理 approval、MCP elicitation 和 request_user_input 请求。
     async def _handle_approval_or_input_request(self, message: Dict[str, Any]) -> None:
         method = str(message.get("method"))
         request_id = message.get("id")
-        result = default_request_response(method)
-        self.events.append(
-            "codex.request.default_response",
-            "Codex 请求需要外部确认，已按默认安全策略响应",
-            {"method": method},
-        )
+        params = message.get("params") or {}
+        if approval_policy_is_never(self.config.approval_policy):
+            result = auto_approved_request_response(method, params)
+            self.events.append(
+                "codex.request.auto_approved",
+                "Codex 请求需要外部确认，已按 approval_policy=never 自动响应",
+                {
+                    "method": method,
+                    "decision": result.get("decision") or result.get("action") or "answered",
+                },
+            )
+        else:
+            result = default_request_response(method)
+            self.events.append(
+                "codex.request.default_response",
+                "Codex 请求需要外部确认，已按默认安全策略响应",
+                {"method": method},
+            )
         await self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
 
     # 函数说明：处理无需响应的 app-server notification。
@@ -341,10 +372,21 @@ def split_command(command: str) -> list:
     return shlex.split(command)
 
 
-# 函数说明：为 Codex 子进程构造环境变量，补上 GUI App 常缺失的 Node/Codex 路径。
-def codex_subprocess_env() -> Dict[str, str]:
+# 函数说明：为 Codex 子进程构造环境变量，补上 GUI App 常缺失的 Node/Codex 路径和 GitHub token。
+def codex_subprocess_env(github_token: Optional[str] = None) -> Dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = build_codex_path(env.get("PATH", ""))
+
+    # 逻辑说明：agent 只能拿到当前 tracker 显式解析出的 token。先清掉父进程可能
+    # 继承来的 GitHub token，避免 GUI/CLI 启动环境意外扩大 agent 权限边界。
+    env.pop("GITHUB_TOKEN", None)
+    env.pop("GH_TOKEN", None)
+
+    if github_token:
+        # 逻辑说明：只把 token 放入子进程环境，不写入事件 payload；EventStore/diagnostics
+        # 仍会对意外出现的 token 字段和 PAT 文本做最后一道脱敏。
+        env["GITHUB_TOKEN"] = github_token
+        env["GH_TOKEN"] = github_token
     return env
 
 
@@ -403,6 +445,10 @@ APPROVAL_OR_INPUT_REQUESTS = {
     "execCommandApproval",
 }
 
+NON_INTERACTIVE_TOOL_INPUT_ANSWER = (
+    "This is a non-interactive session. Operator input is unavailable."
+)
+
 
 # 函数说明：为需要用户介入的 app-server 请求生成默认安全响应。
 def default_request_response(method: str) -> Dict[str, Any]:
@@ -417,3 +463,64 @@ def default_request_response(method: str) -> Dict[str, Any]:
     if method in {"applyPatchApproval", "execCommandApproval"}:
         return {"decision": "denied"}
     return {}
+
+
+# 函数说明：判断 approval policy 是否明确进入高信任 unattended 模式。
+def approval_policy_is_never(approval_policy: Any) -> bool:
+    return approval_policy == "never"
+
+
+# 函数说明：为 approval_policy=never 生成自动响应；只在用户显式配置 never 时调用。
+def auto_approved_request_response(method: str, params: Any) -> Dict[str, Any]:
+    if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+        return {"decision": "acceptForSession"}
+    if method in {"applyPatchApproval", "execCommandApproval"}:
+        return {"decision": "approved_for_session"}
+    if method == "item/permissions/requestApproval":
+        permissions = params.get("permissions") if isinstance(params, dict) else {}
+        return {
+            "permissions": permissions if isinstance(permissions, dict) else {},
+            "scope": "session",
+        }
+    if method == "item/tool/requestUserInput":
+        return {"answers": _tool_user_input_answers(params)}
+    return default_request_response(method)
+
+
+# 函数说明：给工具 user-input 请求选择可继续的答案；approval prompt 优先选 session 级批准。
+def _tool_user_input_answers(params: Any) -> Dict[str, Dict[str, list[str]]]:
+    if not isinstance(params, dict) or not isinstance(params.get("questions"), list):
+        return {}
+
+    answers: Dict[str, Dict[str, list[str]]] = {}
+    for question in params["questions"]:
+        if not isinstance(question, dict) or not isinstance(question.get("id"), str):
+            continue
+        question_id = question["id"]
+        label = _tool_user_input_option_label(question.get("options"))
+        answers[question_id] = {"answers": [label or NON_INTERACTIVE_TOOL_INPUT_ANSWER]}
+    return answers
+
+
+# 函数说明：从选项中挑选最适合 unattended 继续执行的标签。
+def _tool_user_input_option_label(options: Any) -> Optional[str]:
+    if not isinstance(options, list):
+        return None
+
+    labels = [
+        str(option.get("label")).strip()
+        for option in options
+        if isinstance(option, dict) and isinstance(option.get("label"), str)
+    ]
+    for preferred in ("Approve this Session", "Approve Once"):
+        if preferred in labels:
+            return preferred
+    for label in labels:
+        normalized = label.lower()
+        if normalized.startswith(("approve", "allow")):
+            return label
+    for label in labels:
+        normalized = label.lower()
+        if not normalized.startswith(("deny", "decline", "cancel", "stop")):
+            return label
+    return None

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
-from symphony_github.core.config import GithubToolConfig, TrackerConfig
+from symphony_github.core.config import BlockerPolicyConfig, GithubToolConfig, TrackerConfig
 
 from .client import GitHubClient, GitHubClientError
-
+from .tracker import GitHubProjectsV2Tracker
 
 READ_METHODS = {"GET", "HEAD"}
 WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
+ProjectStatusUpdater = Callable[[str, str], Awaitable[Dict[str, Any]]]
 
 
 @dataclass
@@ -28,18 +29,20 @@ class DynamicToolResult:
 
 
 class GitHubDynamicTools:
-    """执行 `github_graphql` 和 `github_rest` 动态工具。"""
+    """执行 GitHub 相关动态工具。"""
 
-    # 函数说明：保存 client、tracker 配置和工具权限模式。
+    # 函数说明：保存 client、tracker 配置、工具权限模式和可复用的 Project Status updater。
     def __init__(
         self,
         client: GitHubClient,
         tracker_config: TrackerConfig,
         tool_config: GithubToolConfig,
+        project_status_updater: Optional[ProjectStatusUpdater] = None,
     ) -> None:
         self.client = client
         self.tracker_config = tracker_config
         self.tool_config = tool_config
+        self.project_status_updater = project_status_updater
 
     # 函数说明：返回 Codex app-server `dynamicTools` 注册列表。
     def tool_specs(self) -> List[Dict[str, Any]]:
@@ -49,7 +52,10 @@ class GitHubDynamicTools:
         return [
             {
                 "name": "github_graphql",
-                "description": "Execute one GitHub GraphQL query or mutation using the configured Symphony GitHub token.",
+                "description": (
+                    "Execute one GitHub GraphQL query or mutation using the configured "
+                    "Symphony GitHub token."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "required": ["query"],
@@ -62,7 +68,10 @@ class GitHubDynamicTools:
             },
             {
                 "name": "github_rest",
-                "description": "Call an allowlisted GitHub REST API relative path using the configured Symphony GitHub token.",
+                "description": (
+                    "Call an allowlisted GitHub REST API relative path using the configured "
+                    "Symphony GitHub token."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "required": ["method", "path"],
@@ -71,6 +80,21 @@ class GitHubDynamicTools:
                         "path": {"type": "string"},
                         "query": {"type": "object"},
                         "body": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "github_update_project_status",
+                "description": (
+                    "Update the configured GitHub Project v2 Status field for one project item."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["project_item_id", "state_name"],
+                    "properties": {
+                        "project_item_id": {"type": "string"},
+                        "state_name": {"type": "string"},
                     },
                     "additionalProperties": False,
                 },
@@ -87,9 +111,13 @@ class GitHubDynamicTools:
                 return await self._execute_graphql(arguments)
             if tool == "github_rest":
                 return await self._execute_rest(arguments)
+            if tool == "github_update_project_status":
+                return await self._execute_update_project_status(arguments)
             return _failure(f"Unsupported dynamic tool: {tool}")
         except GitHubClientError as exc:
             return _failure(f"GitHub API error: {exc}")
+        except ValueError as exc:
+            return _failure(str(exc))
         except Exception as exc:  # noqa: BLE001 - 工具边界必须把异常转成失败响应。
             return _failure(f"GitHub dynamic tool failed: {exc}")
 
@@ -135,6 +163,34 @@ class GitHubDynamicTools:
         response = await self.client.rest(method, path, query=query, body=body)
         return _success(response)
 
+    # 函数说明：通过 tracker 的 Project v2 Status 更新能力执行专用状态流转工具。
+    async def _execute_update_project_status(self, arguments: Any) -> DynamicToolResult:
+        args = _expect_object(arguments, "github_update_project_status")
+        project_item_id = _required_text(args.get("project_item_id"), "project_item_id")
+        state_name = _required_text(args.get("state_name"), "state_name")
+
+        if self.tool_config.mode != "read_write":
+            return _failure(
+                "github_update_project_status requires tools.github.mode=read_write."
+            )
+
+        updater = self.project_status_updater or self._update_project_status_with_tracker
+        response = await updater(project_item_id, state_name)
+        return _success(response)
+
+    # 函数说明：没有显式 tracker 实例时，构造临时 tracker 复用同一套 Status mutation 逻辑。
+    async def _update_project_status_with_tracker(
+        self,
+        project_item_id: str,
+        state_name: str,
+    ) -> Dict[str, Any]:
+        tracker = GitHubProjectsV2Tracker(
+            self.tracker_config,
+            BlockerPolicyConfig(),
+            self.client,
+        )
+        return await tracker.update_project_status(project_item_id, state_name)
+
 
 # 函数说明：构造成功工具响应。
 def _success(payload: Any) -> DynamicToolResult:
@@ -148,7 +204,12 @@ def _success(payload: Any) -> DynamicToolResult:
 def _failure(message: str) -> DynamicToolResult:
     return DynamicToolResult(
         success=False,
-        content_items=[{"type": "inputText", "text": json.dumps({"error": message}, ensure_ascii=False)}],
+        content_items=[
+            {
+                "type": "inputText",
+                "text": json.dumps({"error": message}, ensure_ascii=False),
+            }
+        ],
     )
 
 
@@ -157,6 +218,13 @@ def _expect_object(arguments: Any, tool: str) -> Dict[str, Any]:
     if isinstance(arguments, dict):
         return arguments
     raise ValueError(f"{tool} arguments must be an object.")
+
+
+# 函数说明：读取必填字符串参数，并在空值时返回清晰工具失败。
+def _required_text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"github_update_project_status.{name} must be a non-empty string.")
+    return value.strip()
 
 
 # 函数说明：确认 REST path 是相对 API path，而不是绝对 URL 或协议相对 URL。

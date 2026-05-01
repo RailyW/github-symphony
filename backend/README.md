@@ -27,7 +27,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 
 - GitHub token 只在内存中使用，不写入日志、事件或诊断包。
 - 调度器按配置的 `active_states`、`handoff_states`、`terminal_states` 和 `blocked_states` 理解任意 GitHub Project 自定义阶段。
-- 调度器默认在 Codex turn 成功后按照 `completion_policy` 更新 GitHub Project item 的 `Status` 到目标/交接阶段，但不自动关闭 Issue、不 merge、不 push。
-- GitHub 写能力仍受 PAT 权限、动态工具模式和配置 allowlist 约束。
+- 默认 Autonomy preset 为 `PR 前全自动`，`completion_policy.kind=agent_managed`，由 prompt 和 GitHub 工具驱动 Workpad、分支、commit、push、PR、feedback sweep、`Human Review` 交接和 `Merging` land。
+- 调度器不把 commit、push、merge 做成内置业务动作；GitHub 写能力仍受 PAT 权限、approval policy、动态工具模式和配置 allowlist 约束。
 - CLI 日志默认写入 `~/.github-symphony/logs`；Electron 打包版通过 `SYMPHONY_LOG_DIR` 写入 `<userData>/logs`。
 - 后端只监听 `127.0.0.1`，避免把本地控制面暴露到网络。

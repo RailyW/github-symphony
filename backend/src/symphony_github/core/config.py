@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+DEFAULT_STATUS_OPTIONS = [
+    "Todo",
+    "In Progress",
+    "Rework",
+    "Human Review",
+    "Merging",
+    "Done",
+    "Closed",
+    "Cancelled",
+]
+DEFAULT_ACTIVE_STATES = ["Todo", "In Progress", "Rework", "Merging"]
+DEFAULT_HANDOFF_STATES = ["Human Review"]
+DEFAULT_TERMINAL_STATES = ["Done", "Closed", "Cancelled"]
+DEFAULT_FAILURE_STATE = "Rework"
+HIGH_TRUST_APPROVAL_PRESETS = {"high_trust", "high-trust", "pr_full_auto", "pr-before-full-auto"}
+
 
 @dataclass
 class TrackerConfig:
@@ -19,12 +35,10 @@ class TrackerConfig:
     repositories: List[str]
     api_token: Optional[str]
     status_field: str = "Status"
-    status_options: List[str] = field(default_factory=list)
-    active_states: List[str] = field(default_factory=lambda: ["Todo", "In Progress"])
-    handoff_states: List[str] = field(default_factory=list)
-    terminal_states: List[str] = field(
-        default_factory=lambda: ["Done", "Closed", "Cancelled"]
-    )
+    status_options: List[str] = field(default_factory=lambda: list(DEFAULT_STATUS_OPTIONS))
+    active_states: List[str] = field(default_factory=lambda: list(DEFAULT_ACTIVE_STATES))
+    handoff_states: List[str] = field(default_factory=lambda: list(DEFAULT_HANDOFF_STATES))
+    terminal_states: List[str] = field(default_factory=lambda: list(DEFAULT_TERMINAL_STATES))
     priority_field: Optional[str] = None
     api_base_url: str = "https://api.github.com"
     graphql_url: str = "https://api.github.com/graphql"
@@ -105,10 +119,10 @@ class ToolsConfig:
 class CompletionPolicyConfig:
     """Codex turn 成功后的本地完成策略配置。"""
 
-    kind: str = "update_project_status"
-    success_state: str = "Done"
-    failure_state: Optional[str] = "Rework"
-    mark_done_after_successful_turn: bool = True
+    kind: str = "agent_managed"
+    success_state: str = "Human Review"
+    failure_state: Optional[str] = DEFAULT_FAILURE_STATE
+    mark_done_after_successful_turn: bool = False
     close_issue: bool = False
 
 
@@ -155,19 +169,19 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
         ),
         status_field=str(tracker_raw.get("status_field") or "Status"),
         status_options=_optional_string_list(
-            tracker_raw.get("status_options"),
+            tracker_raw.get("status_options", DEFAULT_STATUS_OPTIONS),
             "tracker.status_options",
         ),
         active_states=_string_list(
-            tracker_raw.get("active_states", ["Todo", "In Progress"]),
+            tracker_raw.get("active_states", DEFAULT_ACTIVE_STATES),
             "tracker.active_states",
         ),
         handoff_states=_optional_string_list(
-            tracker_raw.get("handoff_states"),
+            tracker_raw.get("handoff_states", DEFAULT_HANDOFF_STATES),
             "tracker.handoff_states",
         ),
         terminal_states=_string_list(
-            tracker_raw.get("terminal_states", ["Done", "Closed", "Cancelled"]),
+            tracker_raw.get("terminal_states", DEFAULT_TERMINAL_STATES),
             "tracker.terminal_states",
         ),
         priority_field=_optional_string(tracker_raw.get("priority_field")),
@@ -251,7 +265,10 @@ def _build_codex(raw: Any) -> CodexConfig:
     return CodexConfig(
         command=str(mapping.get("command") or default.command),
         model=_optional_string(mapping.get("model")),
-        approval_policy=mapping.get("approval_policy", default.approval_policy),
+        approval_policy=_normalize_approval_policy(
+            mapping.get("approval_policy", default.approval_policy),
+            default.approval_policy,
+        ),
         thread_sandbox=str(mapping.get("thread_sandbox") or default.thread_sandbox),
         turn_sandbox_policy=dict(mapping.get("turn_sandbox_policy") or default.turn_sandbox_policy),
     )
@@ -281,11 +298,11 @@ def _build_completion_policy(raw: Any, tracker: TrackerConfig) -> CompletionPoli
         else _default_failure_state(tracker)
     )
     return CompletionPolicyConfig(
-        kind=str(mapping.get("kind") or "update_project_status"),
+        kind=str(mapping.get("kind") or "agent_managed"),
         success_state=success_state,
         failure_state=failure_state,
         mark_done_after_successful_turn=bool(
-            mapping.get("mark_done_after_successful_turn", True)
+            mapping.get("mark_done_after_successful_turn", False)
         ),
         close_issue=bool(mapping.get("close_issue", False)),
     )
@@ -473,7 +490,9 @@ def _default_blocked_states(tracker: TrackerConfig) -> List[str]:
 # 函数说明：根据已发现阶段推断默认成功目标，避免固定依赖 Done。
 def _default_success_state(tracker: TrackerConfig) -> str:
     if not tracker.status_options:
-        return "Done"
+        return "Human Review"
+    if "Human Review" in tracker.status_options and "Human Review" not in tracker.active_states:
+        return "Human Review"
     if "Done" in tracker.status_options and "Done" not in tracker.active_states:
         return "Done"
     if tracker.handoff_states:
@@ -490,8 +509,37 @@ def _default_success_state(tracker: TrackerConfig) -> str:
 # 函数说明：根据已发现阶段推断默认失败/返工目标，找不到 Rework 时保持未配置。
 def _default_failure_state(tracker: TrackerConfig) -> Optional[str]:
     if not tracker.status_options:
-        return "Rework"
-    return "Rework" if "Rework" in tracker.status_options else None
+        return DEFAULT_FAILURE_STATE
+    return DEFAULT_FAILURE_STATE if DEFAULT_FAILURE_STATE in tracker.status_options else None
+
+
+# 函数说明：把显式 high-trust preset 归一化为 Codex app-server 已支持的 never。
+def _normalize_approval_policy(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if _approval_policy_is_high_trust_preset(value):
+        return "never"
+    return value
+
+
+# 函数说明：识别用户明确写入的高信任 approval preset，不从普通 granular 配置中推断。
+def _approval_policy_is_high_trust_preset(value: Any) -> bool:
+    if isinstance(value, str):
+        return _normalize_preset_name(value) in HIGH_TRUST_APPROVAL_PRESETS
+    if isinstance(value, dict):
+        for key in ("preset", "autonomy_preset", "mode"):
+            candidate = value.get(key)
+            if (
+                isinstance(candidate, str)
+                and _normalize_preset_name(candidate) in HIGH_TRUST_APPROVAL_PRESETS
+            ):
+                return True
+    return False
+
+
+# 函数说明：归一化 preset 名称，兼容用户输入中的空格和大小写差异。
+def _normalize_preset_name(value: str) -> str:
+    return value.strip().lower().replace(" ", "_")
 
 
 # 函数说明：校验字符串列表内没有重复值。

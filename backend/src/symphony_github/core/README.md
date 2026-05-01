@@ -12,7 +12,7 @@
 - 为每个 GitHub work item 创建独立工作区并执行 hooks。
 - 根据状态、依赖、并发槽和重试策略派发 Codex agent。
 - 将 GitHub Project Status 建模为 `active_states`、`handoff_states`、`terminal_states` 和 `blocked_states`，支持任意自定义阶段名。
-- 在 Codex turn 正常完成后按 `completion_policy` 更新 GitHub Project Status 到目标/交接阶段，避免任务仍处于 active state 时被重复派发。
+- 默认使用 `agent_managed` completion policy，由 prompt 和 GitHub 工具驱动 PR 前自治、`Human Review` 交接和 `Merging` land；也支持切换为 App 自动更新 Project Status。
 - 为 prompt 注入 `workflow.status_policy_markdown` 和结构化阶段策略，让 agent 自动适应当前 Project 配置。
 - 支持热应用新配置；已运行 agent 保留派发时的配置和 runner。
 - 提供日志脱敏、轮转、查询和诊断包导出辅助逻辑。
@@ -21,5 +21,5 @@
 
 - 不直接调用 GitHub API；GitHub 访问通过 `integrations.github` 完成。
 - 不直接实现桌面 UI；UI 只读取 `api` 层暴露的状态。
-- 不自动执行 git commit、merge、push 或远端删除。
-- 不自动关闭 GitHub Issue；当前完成策略只更新 Project item 的 Status。
+- 不把 git commit、push、merge 或远端删除做成调度器内置业务动作；这些动作只能由 agent 在 prompt、approval policy、GitHub token 权限和工具模式允许时执行。
+- 不自动关闭 GitHub Issue；默认 prompt 也禁止通过 PR closing keyword 自动关闭 issue，任务终态以 Project item 的 Status 为准。

@@ -16,6 +16,7 @@
 
 - `github_graphql`：透传 GraphQL query 和 variables。
 - `github_rest`：只允许 GitHub API 相对路径，并按配置仓库做 allowlist 检查。
+- `github_update_project_status`：复用 tracker 的 Project v2 Status mutation，避免 prompt 手写 field/option 查询。
 
 所有工具都必须避免记录 token。写操作只有在 `tools.github.mode: read_write` 时允许。
 

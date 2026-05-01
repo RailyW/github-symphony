@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from typing import Dict, List
+from unittest.mock import patch
 
-from symphony_github.codex.app_server import build_codex_path
+from symphony_github.codex.app_server import (
+    CodexAppServerClient,
+    auto_approved_request_response,
+    build_codex_path,
+    codex_subprocess_env,
+    default_request_response,
+)
 from symphony_github.core.config import build_config
 from symphony_github.core.diagnostics import (
     configure_diagnostics,
@@ -225,8 +234,65 @@ Prompt body
         self.assertEqual(document.config.tracker.owner_type, "user")
         self.assertEqual(document.config.tracker.api_token, "token")
         self.assertEqual(document.config.agent.max_concurrent_agents, 3)
-        self.assertEqual(document.config.completion_policy.success_state, "Done")
+        self.assertEqual(document.config.completion_policy.kind, "agent_managed")
+        self.assertEqual(document.config.completion_policy.success_state, "Human Review")
+        self.assertFalse(document.config.completion_policy.mark_done_after_successful_turn)
         self.assertEqual(document.config.logging.level, "DEBUG")
+
+    # 函数说明：测试默认状态机支持 PR 前自治，Merging 可派发而 Human Review 只用于交接。
+    def test_default_config_uses_pr_autonomy_state_machine(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+
+        self.assertEqual(
+            config.tracker.status_options,
+            [
+                "Todo",
+                "In Progress",
+                "Rework",
+                "Human Review",
+                "Merging",
+                "Done",
+                "Closed",
+                "Cancelled",
+            ],
+        )
+        self.assertIn("Merging", config.tracker.active_states)
+        self.assertNotIn("Human Review", config.tracker.active_states)
+        self.assertEqual(config.tracker.handoff_states, ["Human Review"])
+        self.assertEqual(config.tracker.terminal_states, ["Done", "Closed", "Cancelled"])
+        self.assertEqual(config.completion_policy.kind, "agent_managed")
+        self.assertEqual(config.completion_policy.success_state, "Human Review")
+        self.assertEqual(config.completion_policy.failure_state, "Rework")
+        self.assertFalse(config.completion_policy.mark_done_after_successful_turn)
+
+    # 函数说明：测试显式 high-trust approval preset 会归一化为 Codex app-server 的 never。
+    def test_high_trust_approval_preset_normalizes_to_never(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "codex": {"approval_policy": {"preset": "high-trust"}},
+            }
+        )
+
+        self.assertEqual(config.codex.approval_policy, "never")
 
     # 函数说明：测试自定义 Project 阶段可导入、归一化和导出，且成功目标不必属于 terminal。
     def test_custom_status_policy_allows_handoff_success_state(self) -> None:
@@ -287,6 +353,7 @@ completion_policy:
                     "completion_policy": {
                         "kind": "update_project_status",
                         "success_state": "Ready",
+                        "mark_done_after_successful_turn": True,
                     },
                 }
             )
@@ -341,6 +408,7 @@ completion_policy:
                     "owner": "acme",
                     "project_number": 1,
                     "repositories": ["acme/demo"],
+                    "status_options": [],
                     "active_states": ["Ready"],
                     "terminal_states": ["Shipped"],
                 },
@@ -425,6 +493,108 @@ completion_policy:
         self.assertFalse(result.success)
         self.assertIn("read_write", result.content_items[0]["text"])
 
+    # 函数说明：测试专用 Project Status 工具会注册给 Codex app-server。
+    def test_tool_specs_include_project_status_update(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        tools = GitHubDynamicTools(FakeGitHubClient(), config.tracker, config.tools.github)
+
+        self.assertIn(
+            "github_update_project_status",
+            [tool["name"] for tool in tools.tool_specs()],
+        )
+
+    # 函数说明：测试 read_write 模式下专用工具复用 tracker 的 Project Status mutation。
+    async def test_update_project_status_tool_uses_tracker_status_update(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        client = FakeProjectClient()
+        tools = GitHubDynamicTools(client, config.tracker, config.tools.github)
+
+        result = await tools.execute(
+            "github_update_project_status",
+            {"project_item_id": "PVTI_1", "state_name": "Done"},
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(client.mutation_variables["itemId"], "PVTI_1")
+        self.assertEqual(client.mutation_variables["optionId"], "done-id")
+
+    # 函数说明：测试 read_only 模式下专用 Project Status 工具返回结构化失败。
+    async def test_update_project_status_tool_requires_read_write(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "tools": {"github": {"enabled": True, "mode": "read_only"}},
+            }
+        )
+        tools = GitHubDynamicTools(FakeProjectClient(), config.tracker, config.tools.github)
+
+        result = await tools.execute(
+            "github_update_project_status",
+            {"project_item_id": "PVTI_1", "state_name": "Done"},
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("read_write", result.content_items[0]["text"])
+
+    # 函数说明：测试专用 Project Status 工具会校验空 item id 和未知状态。
+    async def test_update_project_status_tool_returns_structured_failures(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        tools = GitHubDynamicTools(FakeProjectClient(), config.tracker, config.tools.github)
+
+        empty_result = await tools.execute(
+            "github_update_project_status",
+            {"project_item_id": "", "state_name": "Done"},
+        )
+        unknown_result = await tools.execute(
+            "github_update_project_status",
+            {"project_item_id": "PVTI_1", "state_name": "Missing"},
+        )
+
+        self.assertFalse(empty_result.success)
+        self.assertIn("project_item_id", empty_result.content_items[0]["text"])
+        self.assertFalse(unknown_result.success)
+        self.assertIn("不存在选项", unknown_result.content_items[0]["text"])
+
 
 class CodexAppServerClientTest(unittest.TestCase):
     """验证 Codex app-server 客户端的环境辅助逻辑。"""
@@ -438,6 +608,168 @@ class CodexAppServerClientTest(unittest.TestCase):
         self.assertIn("/usr/bin", parts)
         self.assertIn("/bin", parts)
         self.assertEqual(parts.count("/usr/bin"), 1)
+
+    # 函数说明：测试配置的 GitHub token 会注入 Codex 子进程环境变量。
+    def test_codex_subprocess_env_injects_github_tokens(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "parent-token", "GH_TOKEN": "parent-gh-token"},
+            clear=False,
+        ):
+            env = codex_subprocess_env("ghp_1234567890abcdefghijklmnopqrstuvwxyz")
+
+        self.assertEqual(env["GITHUB_TOKEN"], "ghp_1234567890abcdefghijklmnopqrstuvwxyz")
+        self.assertEqual(env["GH_TOKEN"], "ghp_1234567890abcdefghijklmnopqrstuvwxyz")
+
+    # 函数说明：测试未配置 tracker token 时不会把父进程 GitHub token 泄露给 agent。
+    def test_codex_subprocess_env_does_not_inherit_github_tokens_without_configured_token(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "parent-token", "GH_TOKEN": "parent-gh-token"},
+            clear=False,
+        ):
+            env = codex_subprocess_env(None)
+
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("GH_TOKEN", env)
+
+    # 函数说明：测试默认 approval 响应保持保守拒绝。
+    def test_default_approval_response_declines_requests(self) -> None:
+        self.assertEqual(
+            default_request_response("item/commandExecution/requestApproval"),
+            {"decision": "decline"},
+        )
+        self.assertEqual(default_request_response("applyPatchApproval"), {"decision": "denied"})
+
+    # 函数说明：测试 approval_policy=never 会生成高信任自动批准响应。
+    def test_never_approval_policy_auto_approves_known_requests(self) -> None:
+        self.assertEqual(
+            auto_approved_request_response("item/commandExecution/requestApproval", {}),
+            {"decision": "acceptForSession"},
+        )
+        self.assertEqual(
+            auto_approved_request_response("execCommandApproval", {}),
+            {"decision": "approved_for_session"},
+        )
+        tool_response = auto_approved_request_response(
+            "item/tool/requestUserInput",
+            {
+                "questions": [
+                    {
+                        "id": "mcp_tool_call_approval_1",
+                        "options": [
+                            {"label": "Approve Once"},
+                            {"label": "Approve this Session"},
+                            {"label": "Deny"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            tool_response["answers"]["mcp_tool_call_approval_1"]["answers"],
+            ["Approve this Session"],
+        )
+
+    # 函数说明：测试 app-server 处理自动批准时会写入可观测事件。
+    def test_never_approval_policy_emits_auto_approved_event(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+                "codex": {"approval_policy": "never"},
+            }
+        )
+        events = EventStore()
+        client = CapturingCodexAppServerClient(
+            config=config.codex,
+            workspace="/tmp/github-symphony-test",
+            events=events,
+        )
+
+        asyncio.run(
+            client._handle_approval_or_input_request(
+                {"id": 99, "method": "item/fileChange/requestApproval", "params": {}}
+            )
+        )
+
+        self.assertEqual(client.writes[0]["result"], {"decision": "acceptForSession"})
+        self.assertTrue(
+            any(event.event_type == "codex.request.auto_approved" for event in events.recent())
+        )
+
+    # 函数说明：测试动态工具执行器异常会转成结构化失败，不会中断 app-server 读取循环。
+    def test_dynamic_tool_executor_exception_returns_structured_failure(self) -> None:
+        secret = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+
+        # 函数说明：模拟工具执行器内部 bug；异常文本包含 PAT，用于验证响应脱敏。
+        async def failing_executor(_tool: str, _arguments: dict) -> dict:
+            raise RuntimeError(f"boom {secret}")
+
+        events = EventStore()
+        client = CapturingCodexAppServerClient(
+            config=config.codex,
+            workspace="/tmp/github-symphony-test",
+            events=events,
+            dynamic_tool_executor=failing_executor,
+        )
+
+        asyncio.run(
+            client._handle_dynamic_tool_call(
+                {
+                    "id": 101,
+                    "method": "item/tool/call",
+                    "params": {
+                        "tool": "github_update_project_status",
+                        "arguments": {"project_item_id": "PVTI_1", "state_name": "Done"},
+                    },
+                }
+            )
+        )
+
+        result = client.writes[0]["result"]
+        error_text = result["contentItems"][0]["text"]
+
+        self.assertFalse(result["success"])
+        self.assertIn("Dynamic tool failed", json.loads(error_text)["error"])
+        self.assertNotIn(secret, error_text)
+        self.assertTrue(
+            any(event.event_type == "codex.dynamic_tool.called" for event in events.recent())
+        )
+
+
+class CapturingCodexAppServerClient(CodexAppServerClient):
+    """用于测试 app-server request handler 的假客户端。"""
+
+    # 函数说明：初始化写入记录，避免单元测试启动真实 Codex 进程。
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.writes: List[Dict] = []
+
+    # 函数说明：截获 JSON-RPC 响应，供测试断言 approval 自动响应内容。
+    async def _write(self, message: Dict) -> None:
+        self.writes.append(message)
 
 
 class FakeProjectClient(GitHubClient):
@@ -901,6 +1233,11 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                         "terminal_states": ["Done"],
                     },
                     "workspace": {"root": tmp},
+                    "completion_policy": {
+                        "kind": "update_project_status",
+                        "success_state": "Done",
+                        "mark_done_after_successful_turn": True,
+                    },
                 }
             )
             item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)

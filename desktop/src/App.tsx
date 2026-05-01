@@ -643,7 +643,11 @@ function GitHubSettings({
       }
       const priorityField = choosePriorityField(result.priority_fields, settings.tracker.priority_field);
       const statusOptions = statusField.options.map((option) => option.name);
-      const activeStates = chooseStates(statusOptions, ["Todo", "In Progress", "Rework"], "first");
+      const activeStates = chooseStates(
+        statusOptions,
+        ["Todo", "In Progress", "Rework", "Merging"],
+        "first",
+      );
       const terminalStates = chooseStates(statusOptions, ["Done", "Closed", "Cancelled"], "last");
       const handoffStates = chooseHandoffStates(
         statusOptions,
@@ -721,6 +725,8 @@ function GitHubSettings({
           <p>
             当前状态：{tokenStatus.configured ? "已保存到系统安全存储" : "未保存"}。
             {tokenStatus.encryptionAvailable ? "保存 token 时会使用 safeStorage 加密。" : "safeStorage 不可用。"}
+            默认 Autonomy preset 是 PR 前全自动；如果 token 具备仓库写权限，Codex 子进程会获得
+            GITHUB_TOKEN/GH_TOKEN 并可按 prompt 执行 push、PR 和 Project Status 写入。
           </p>
         </div>
         <input
@@ -981,8 +987,16 @@ function CompletionSettings({
     <>
       <SectionIntro
         title="Completion"
-        text="配置 Codex turn 正常完成后的目标/交接阶段。目标可以是 Human Review、Ready for QA、Shipped 等任意非 active 阶段，不必固定为 Done。"
+        text="配置 Codex turn 正常完成后的目标/交接阶段。默认 Autonomy preset 为 PR 前全自动，成功后由 agent 把任务交接到 Human Review。"
       />
+      <div className="autonomyPreset">
+        <span>Autonomy preset</span>
+        <strong>PR 前全自动</strong>
+        <p>
+          App 不在本地 runner 内置 commit、push 或 merge。agent_managed 模式要求 prompt 与
+          GitHub tools 驱动 Workpad、分支、PR、feedback sweep、checks green 和状态流转。
+        </p>
+      </div>
       <div className="formGrid">
         <SelectField
           label="Policy Kind"
@@ -1025,7 +1039,8 @@ function CompletionSettings({
       </div>
       <div className="inlineHint">
         update_project_status 会由 App 自动把 Project Status 改到目标阶段；agent_managed 会交给 prompt
-        和 GitHub 工具自行流转；none 不做状态写入。当前版本不会自动关闭 Issue、merge PR、push 代码。
+        和 GitHub 工具自行流转；none 不做状态写入。默认不会自动关闭 Issue，Merging 仍需要人工先把
+        Project Status 移入该阶段。
       </div>
     </>
   );
@@ -1075,6 +1090,13 @@ function CodexSettings({
           draft.codex.approval_policy = value;
         })}
       />
+      {isNeverApprovalPolicy(settings.codex.approval_policy) ? (
+        <div className="inlineWarningBox">
+          approval_policy 为 never 或 high_trust preset 时，app-server 的 command、file-change、
+          applyPatch、exec 和可识别工具 approval prompt 会自动批准。只应在隔离工作区、受限 token 和可信
+          prompt 下使用。
+        </div>
+      ) : null}
       <JsonField
         label="Turn Sandbox Policy JSON"
         value={settings.codex.turn_sandbox_policy}
@@ -1183,6 +1205,12 @@ function ToolSettings({
           draft.blocker_policy.blocked_states = values;
         })}
       />
+      {settings.tools.github.mode === "read_write" ? (
+        <div className="inlineWarningBox">
+          read_write 会允许 GitHub GraphQL mutation、仓库 allowlist 内的 REST 写操作，以及
+          github_update_project_status。配合具备写权限的 token 时，agent 可以更新评论、PR 和 Project Status。
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1444,7 +1472,8 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
       items: [
         "任务来源是 GitHub Projects v2，不是本地 todo 文件。",
         "执行对象是 Project 中的 Issue 或 Pull Request。",
-        "本 App 不会自动 commit、merge、push；远端写操作取决于 prompt、token 权限和 GitHub tools 模式。",
+        "默认 Autonomy preset 是 PR 前全自动：agent 可在隔离工作区内 branch、commit、push、开/更新 PR、处理 PR feedback 和等待 checks green。",
+        "调度器不会把 commit、push、merge 做成内置业务动作；这些远端写操作只由 prompt、approval policy、token 权限和 GitHub tools 模式共同允许的 agent 执行。",
       ],
     },
     {
@@ -1456,9 +1485,10 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "在 Settings / GitHub Project 顶部粘贴 PAT，点击 Connect PAT，然后选择 owner 和 Project。",
         "点击 Load Project Details，让 App 自动读取 Status 字段、状态选项和 Project 中出现过的仓库。",
         "在 GitHub Project 页把阶段分成 Active、Handoff、Terminal 三类，并在 Tools 里选择哪些阶段会受 issue dependencies 阻塞。",
-        "只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub 时需要相应写权限。",
+        "默认状态建议为 Todo、In Progress、Rework、Human Review、Merging、Done、Closed、Cancelled；Merging 是 active land 阶段，Human Review 是人工交接阶段。",
+        "只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub、push 分支或更新 PR 时需要相应写权限。",
         "在 Workspace 设置 root 和 after_create hook。常见 hook 是 git clone 目标仓库到当前工作区。",
-        "在 Prompt 中写明 agent 的工作边界、验证要求、是否允许创建分支或远端评论。",
+        "在 Prompt 中保留 Workpad、branch/commit/push/PR、PR feedback sweep、checks green、Human Review 和 Merging land 的规则。",
         "点击 Save & Apply，然后回到 Dashboard 看候选任务、运行中 agent 和事件流。",
       ],
     },
@@ -1468,7 +1498,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "Project number 是 GitHub Project URL 中的数字，不是仓库 Issue 编号。Status 字段必须是 Project 的 single-select 字段，本 App 用它判断任务是否可派发、等待交接或已经结束。",
       ],
       items: [
-        "Active states：允许派发给 Codex agent 的状态，例如 Ready、Coding、Rework。",
+        "Active states：允许派发给 Codex agent 的状态，例如 Todo、In Progress、Rework、Merging。",
         "Handoff states：不再自动派发、等待人工或外部系统接手的状态，例如 Human Review、QA Review、Waiting for Approval。",
         "Terminal states：真正结束、可用于未来清理策略的状态，例如 Shipped、Closed、Cancelled。",
         "Priority 字段可选；如果配置，候选任务会按 priority 升序、创建时间、identifier 排序。",
@@ -1485,9 +1515,10 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "GitHub Project 页会通过 PAT discovery 填充 owner、project number、Status 字段、状态和 repositories。",
         "Workspace root 可以使用 ~，每个任务会在 root 下创建独立目录。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
-        "Completion 默认会在成功 turn 后把 Project Status 更新到 Success Target State；这个目标可以是 Human Review 或 Ready for QA，不必是 Done。",
+        "Completion 默认使用 agent_managed；agent 在 PR 前置门禁达标后把 Project Status 移到 Human Review，App 不在成功 turn 后自动改状态。",
+        "approval_policy: never 或 high_trust preset 是高信任模式，会自动批准 app-server 的命令、文件变更和可识别工具 approval prompt；只应配合隔离工作区、受限 token 和可信 prompt 使用。",
         "Logging 默认 DEBUG、保留 14 天，可在 Logs 页面查询和导出诊断包。",
-        "Tools mode 为 read_only 时会拒绝 REST 写操作和 GraphQL mutation。",
+        "Tools mode 为 read_only 时会拒绝 REST 写操作、GraphQL mutation 和 github_update_project_status；read_write 会允许这些写入口。",
       ],
     },
     {
@@ -1501,7 +1532,9 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "明确要求 agent 先阅读 Issue/PR 描述和相关代码，再做最小必要修改。",
         "明确验证方式，例如运行哪些测试、如何汇报失败原因。",
         "如果 completion policy 是 agent_managed，要在 prompt 中要求 agent 使用 GitHub 工具把 Project Status 移到目标交接阶段。",
-        "如果不希望自动 push/merge，直接写入 prompt；同时保持 token 权限最小化。",
+        "进入 Human Review 前要求 Workpad 已更新、PR 已链接、checks green、PR feedback sweep 无未处理 actionable comments。",
+        "进入 Merging 后只执行 land 流程；确认人工批准、checks green、分支同步和必要验证后再 squash merge，并把 Project Status 移到 Done。",
+        "高信任 prompt 必须明确禁止 force push、直接 push 默认分支、删除远端分支、自动关闭 issue。",
       ],
     },
     {
@@ -2122,6 +2155,30 @@ function knownStatusStates(settings: AppSettings): string[] {
       ].filter(Boolean),
     ),
   );
+}
+
+// 函数说明：判断 Codex approval policy 是否明确进入高信任 unattended 模式。
+function isNeverApprovalPolicy(value: unknown): boolean {
+  if (value === "never") {
+    return true;
+  }
+  if (typeof value === "string") {
+    return isHighTrustPresetName(value);
+  }
+  if (value && typeof value === "object") {
+    const candidate = value as Record<string, unknown>;
+    return ["preset", "autonomy_preset", "mode"].some((key) => {
+      const preset = candidate[key];
+      return typeof preset === "string" && isHighTrustPresetName(preset);
+    });
+  }
+  return false;
+}
+
+// 函数说明：归一化 high-trust preset 名称，和后端配置解析保持一致。
+function isHighTrustPresetName(value: string): boolean {
+  const normalized = value.trim().toLowerCase().replaceAll(" ", "_");
+  return ["high_trust", "high-trust", "pr_full_auto", "pr-before-full-auto"].includes(normalized);
 }
 
 // 函数说明：根据表单状态生成 token 更新语义。

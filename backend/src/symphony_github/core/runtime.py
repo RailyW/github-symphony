@@ -42,7 +42,12 @@ def build_runtime_components(
         client=client,
         events=events,
     )
-    github_tools = GitHubDynamicTools(client, config.tracker, config.tools.github)
+    github_tools = GitHubDynamicTools(
+        client,
+        config.tracker,
+        config.tools.github,
+        project_status_updater=tracker.update_project_status,
+    )
 
     # 函数说明：为每个 dispatch 创建新的 runner，避免跨任务共享 Codex app-server 状态。
     def runner_factory() -> AgentRunner:

@@ -558,6 +558,16 @@ select {
   font-size: 12px;
 }
 
+.inlineWarningBox {
+  border: 1px solid #f4b6a8;
+  border-radius: 8px;
+  background: #fff4ef;
+  color: #8a2a19;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .tokenBox {
   display: grid;
   gap: 10px;
@@ -639,6 +649,34 @@ select {
   padding: 12px;
   color: #667085;
   font-size: 13px;
+}
+
+.autonomyPreset {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.autonomyPreset span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.autonomyPreset strong {
+  color: #111827;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.autonomyPreset p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .advancedBox {

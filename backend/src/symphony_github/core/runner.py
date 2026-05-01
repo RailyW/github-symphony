@@ -199,6 +199,7 @@ class AgentRunner:
             config=self.config.codex,
             workspace=workspace,
             events=self.events,
+            github_token=self.config.tracker.api_token,
             dynamic_tool_specs=specs,
             dynamic_tool_executor=execute_tool,
         )

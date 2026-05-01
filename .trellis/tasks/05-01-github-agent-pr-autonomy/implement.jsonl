@@ -1,0 +1,13 @@
+{"file": ".trellis/spec/shared/index.md", "reason": "Shared coding and project lineage rules apply across backend, desktop, docs, and workflow defaults."}
+{"file": ".trellis/spec/shared/project-context.md", "reason": "Project is a derivative of upstream OpenAI Symphony and must preserve the GitHub-specific direction."}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Mandatory quality rules for all code changes."}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Desktop TypeScript changes must keep explicit safe types."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend runtime, config, runner, GitHub tools, and documentation changes."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Dynamic tool and runtime failures must surface structured errors."}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Token injection and diagnostics changes must not leak secrets."}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Backend quality checks and import/structure conventions."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Desktop Settings and Help UI changes."}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "React state/update changes must avoid known pitfalls."}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Frontend type definitions/settings shape changes."}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Desktop TypeScript and UI quality constraints."}
+{"file": ".trellis/tasks/05-01-github-agent-pr-autonomy/research/upstream-symphony-autonomy.md", "reason": "Upstream autonomy model and local gap analysis for implementation."}
