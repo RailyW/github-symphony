@@ -75,6 +75,7 @@ logging:
 - 标题：`{{ issue.title }}`
 - 仓库：`{{ issue.repository }}`
 - 链接：`{{ issue.url }}`
+- Project item ID：`{{ issue.project_item_id }}`
 
 {{ workflow.status_policy_markdown }}
 
@@ -89,15 +90,16 @@ logging:
 1. 先读取 issue/PR 描述、现有评论、关联 PR 和仓库代码，再开始修改。
 2. 使用单个 issue comment 作为 `## Codex Workpad`。如果已存在 Workpad，就更新它；不要新建多个进度评论。
 3. Workpad 至少记录：当前计划、实现摘要、验证命令与结果、PR 链接、未处理风险或阻塞。
-4. 真实阻塞仅限外部条件：缺权限、缺 secret、仓库不可访问、CI/checks 无法判断、GitHub/API/网络故障等。遇到真实阻塞时，在 Workpad 写清原因、缺口和下一步；不要用“等待 ok/行/continue”作为阻塞理由。
-5. 非 Merging 阶段完成 PR 前置门禁后，必须更新 Workpad，并使用 GitHub 工具把 Project Status 移到 `{{ workflow.success_state }}`。
-6. 失败或需要返工时，把 Project Status 移到 `{{ workflow.failure_state }}`，并在 Workpad 写清楚原因和下一步。
+4. Project Status 流转必须优先使用专用动态工具 `github_update_project_status`，参数为当前 Project item ID 和目标状态名。
+5. 真实阻塞仅限外部条件：缺权限、缺 secret、仓库不可访问、CI/checks 无法判断、GitHub/API/网络故障等。遇到真实阻塞时，在 Workpad 写清原因、缺口和下一步；不要用“等待 ok/行/continue”作为阻塞理由。
+6. 非 Merging 阶段完成 PR 前置门禁后，必须更新 Workpad，并调用 `github_update_project_status` 把 Project Status 移到 `{{ workflow.success_state }}`。
+7. 失败或需要返工时，调用 `github_update_project_status` 把 Project Status 移到 `{{ workflow.failure_state }}`，并在 Workpad 写清楚原因和下一步。
 
 ### 状态流转
 
 - `Todo`：先使用 GitHub 工具把 Project Status 移到 `In Progress`，然后创建或更新 `## Codex Workpad`，再开始复现、计划和实现。
 - `In Progress` / `Rework`：完成复现、计划、实现和验证。创建或复用任务分支，保持分支基于最新默认分支；按逻辑提交 commit，push 到远端，并创建或更新一个 PR。
-- PR 前置门禁：验收项完成；必要验证已运行并记录；最新 pushed commit 的 checks 为 green；PR 已链接到当前 issue；PR feedback sweep 没有未处理的 actionable comments；Workpad 已记录验证结果、PR 链接和剩余风险。
+- PR 前置门禁：验收项完成；必要验证已运行并记录；最新 pushed commit 的 checks 为 green；如果仓库或 PR 没有 reported checks，则在 Workpad 记录 `no checks reported` 且不把它视为阻塞；PR 已链接到当前 issue；PR feedback sweep 没有未处理的 actionable comments；Workpad 已记录验证结果、PR 链接和剩余风险。
 - `Human Review`：这是非 active 交接状态。不要继续改代码，不要自行 merge；等待人工审批或把状态移到 `Rework` / `Merging`。
 - `Merging`：这是唯一允许自动 merge 的 active land 状态。只执行合并前检查和 land 流程：确认 PR 已获人工批准、checks green、分支已同步、必要验证仍通过，然后使用默认 squash merge 合并，并把 Project Status 移到 `Done`。
 

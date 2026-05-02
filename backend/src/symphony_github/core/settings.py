@@ -49,6 +49,7 @@ DEFAULT_PROMPT_TEMPLATE = "\n".join(
         "- 标题：`{{ issue.title }}`",
         "- 仓库：`{{ issue.repository }}`",
         "- 链接：`{{ issue.url }}`",
+        "- Project item ID：`{{ issue.project_item_id }}`",
         "",
         "{{ workflow.status_policy_markdown }}",
         "",
@@ -78,17 +79,22 @@ DEFAULT_PROMPT_TEMPLATE = "\n".join(
         ),
         "3. Workpad 至少记录：当前计划、实现摘要、验证命令与结果、PR 链接、未处理风险或阻塞。",
         (
-            "4. 真实阻塞仅限外部条件：缺权限、缺 secret、仓库不可访问、"
+            "4. Project Status 流转必须优先使用专用动态工具 "
+            "`github_update_project_status`，参数为当前 Project item ID 和目标状态名。"
+        ),
+        (
+            "5. 真实阻塞仅限外部条件：缺权限、缺 secret、仓库不可访问、"
             "CI/checks 无法判断、GitHub/API/网络故障等。遇到真实阻塞时，"
             "在 Workpad 写清原因、缺口和下一步；不要用“等待 ok/行/continue”"
             "作为阻塞理由。"
         ),
         (
-            "5. 非 Merging 阶段完成 PR 前置门禁后，必须更新 Workpad，并使用 "
-            "GitHub 工具把 Project Status 移到 `{{ workflow.success_state }}`。"
+            "6. 非 Merging 阶段完成 PR 前置门禁后，必须更新 Workpad，并调用 "
+            "`github_update_project_status` 把 Project Status 移到 "
+            "`{{ workflow.success_state }}`。"
         ),
         (
-            "6. 失败或需要返工时，把 Project Status 移到 "
+            "7. 失败或需要返工时，调用 `github_update_project_status` 把 Project Status 移到 "
             "`{{ workflow.failure_state }}`，并在 Workpad 写清楚原因和下一步。"
         ),
         "",
@@ -105,8 +111,10 @@ DEFAULT_PROMPT_TEMPLATE = "\n".join(
         ),
         (
             "- PR 前置门禁：验收项完成；必要验证已运行并记录；最新 pushed commit "
-            "的 checks 为 green；PR 已链接到当前 issue；PR feedback sweep 没有"
-            "未处理的 actionable comments；Workpad 已记录验证结果、PR 链接和剩余风险。"
+            "的 checks 为 green；如果仓库或 PR 没有 reported checks，则在 Workpad "
+            "记录 `no checks reported` 且不把它视为阻塞；PR 已链接到当前 issue；"
+            "PR feedback sweep 没有未处理的 actionable comments；Workpad 已记录验证"
+            "结果、PR 链接和剩余风险。"
         ),
         (
             "- `Human Review`：这是非 active 交接状态。不要继续改代码，不要自行 merge；"
@@ -141,6 +149,22 @@ DEFAULT_PROMPT_TEMPLATE = "\n".join(
     ]
 )
 
+LEGACY_BRIEF_PROMPT_TEMPLATE = "\n".join(
+    [
+        "你正在处理 GitHub 任务：",
+        "",
+        "- 标识：`{{ issue.identifier }}`",
+        "- 标题：`{{ issue.title }}`",
+        "- 仓库：`{{ issue.repository }}`",
+        "- 链接：`{{ issue.url }}`",
+        "",
+        (
+            "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。完成后请在 "
+            "GitHub 中留下清晰的工作说明、验证结果和剩余风险。"
+        ),
+    ]
+)
+
 
 # 函数说明：把前端传入的 App settings 转成后端运行配置，并返回归一化 settings。
 def normalize_app_settings(
@@ -150,7 +174,9 @@ def normalize_app_settings(
 ) -> AppSettingsDocument:
     # 逻辑说明：先转回现有 front matter 形状，再复用 build_config 的统一校验逻辑。
     raw_config = settings_to_raw_config(raw_settings, github_token=github_token)
-    prompt_template = _expect_prompt(raw_settings.get("prompt_template"))
+    prompt_template = _migrate_legacy_prompt_template(
+        _expect_prompt(raw_settings.get("prompt_template"))
+    )
     config = build_config(raw_config, workflow_path=workflow_path)
     return AppSettingsDocument(
         settings=settings_from_config(config, prompt_template),
@@ -470,6 +496,20 @@ def _expect_prompt(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("prompt_template 必须是非空字符串")
     return value
+
+
+# 函数说明：把旧版内置短 prompt 升级为当前默认自治 prompt，保留用户自定义模板。
+def _migrate_legacy_prompt_template(prompt_template: str) -> str:
+    if _normalize_prompt_for_comparison(prompt_template) == _normalize_prompt_for_comparison(
+        LEGACY_BRIEF_PROMPT_TEMPLATE
+    ):
+        return DEFAULT_PROMPT_TEMPLATE
+    return prompt_template
+
+
+# 函数说明：规整换行和首尾空白，只用于识别历史内置模板，不改变真实 prompt。
+def _normalize_prompt_for_comparison(prompt_template: str) -> str:
+    return prompt_template.replace("\r\n", "\n").strip()
 
 
 # 函数说明：返回旧设置缺少 approval policy 时使用的保守 granular 策略。

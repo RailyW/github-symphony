@@ -264,6 +264,8 @@ Prompt body
             "non-interactive",
             "无人值守",
             "runner 无法接收",
+            "{{ issue.project_item_id }}",
+            "github_update_project_status",
             "ok",
             "行",
             "continue",
@@ -273,6 +275,7 @@ Prompt body
             "create/update PR",
             "{{ workflow.success_state }}",
             "## Codex Workpad",
+            "no checks reported",
             "CI/checks 无法判断",
             "除非当前 Project Status 是 `Merging`，不要自动 merge",
         ]:
@@ -418,9 +421,38 @@ Prompt body
         self.assertIn("无法接收 `ok` / `行` / `continue`", prompt)
         self.assertIn("commit、push task branch、create/update PR 已授权", prompt)
         self.assertIn("不得等待人工确认后再 commit、push 或创建/更新 PR", prompt)
+        self.assertIn("Project item ID：`{{ issue.project_item_id }}`", prompt)
+        self.assertIn("github_update_project_status", prompt)
+        self.assertIn("no checks reported", prompt)
         self.assertIn("CI/checks 无法判断", prompt)
         self.assertIn("把 Project Status 移到 `{{ workflow.success_state }}`", prompt)
         self.assertIn("除非当前 Project Status 是 `Merging`，不要自动 merge", prompt)
+
+    # 函数说明：测试旧安装保存的内置短 prompt 会迁移为当前 PR 前自治默认 prompt。
+    def test_normalize_app_settings_migrates_legacy_brief_prompt(self) -> None:
+        settings = json.loads(json.dumps(default_app_settings()))
+        settings["prompt_template"] = "\n".join(
+            [
+                "你正在处理 GitHub 任务：",
+                "",
+                "- 标识：`{{ issue.identifier }}`",
+                "- 标题：`{{ issue.title }}`",
+                "- 仓库：`{{ issue.repository }}`",
+                "- 链接：`{{ issue.url }}`",
+                "",
+                (
+                    "请先阅读 issue/PR 描述和仓库代码，再实施最小必要修改。完成后请在 "
+                    "GitHub 中留下清晰的工作说明、验证结果和剩余风险。"
+                ),
+            ]
+        )
+
+        document = normalize_app_settings(settings, github_token="token")
+
+        prompt = str(document.settings["prompt_template"])
+        self.assertIn("github_update_project_status", prompt)
+        self.assertIn("Project item ID：`{{ issue.project_item_id }}`", prompt)
+        self.assertIn("no checks reported", prompt)
 
     # 函数说明：测试显式 high-trust approval preset 会归一化为 Codex app-server 的 never。
     def test_high_trust_approval_preset_normalizes_to_never(self) -> None:

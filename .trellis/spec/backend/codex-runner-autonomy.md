@@ -60,7 +60,12 @@ autonomy.
     secrets, inaccessible repository, GitHub/API/network failures, or CI/checks
     that cannot be determined.
   - Before handoff, the agent must update the single `## Codex Workpad` comment
-    and use GitHub tools to move Project Status to `{{ workflow.success_state }}`.
+    and use the `github_update_project_status` tool to move Project Status to
+    `{{ workflow.success_state }}` with the current `project_item_id`.
+  - The default prompt must include the Project item ID. If a repository or PR
+    reports no checks, the agent must record `no checks reported` in the
+    Workpad and may continue handoff instead of treating absent checks as a
+    blocker.
   - Automatic merge is forbidden unless the current Project Status is `Merging`.
 - Approval contract:
   - New settings use `{"preset": "high-trust"}` and backend config normalizes it
@@ -152,6 +157,9 @@ if turn_index + 1 >= config.agent.max_turns:
 - Keep the four default prompt sources synchronized:
   `WORKFLOW.example.md`, backend default settings, Electron main fallback, and
   browser fallback settings.
+- When the built-in prompt semantics change, legacy saved settings that still
+  match the old built-in short prompt must migrate to the current default prompt
+  while preserving custom user prompts.
 - Keep backend high-trust preset names and frontend `isNeverApprovalPolicy`
   mirror logic synchronized.
 - Do not add plaintext provider secrets to App settings to make unattended mode
