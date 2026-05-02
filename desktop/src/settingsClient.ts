@@ -317,7 +317,16 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    throw new Error(`HTTP ${response.status}: ${redactSecretText(await response.text())}`);
   }
   return (await response.json()) as T;
+}
+
+// 函数说明：脱敏 fallback HTTP 错误文本，避免调试模式把 PAT 显示到 renderer 错误提示中。
+function redactSecretText(text: string): string {
+  return text
+    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "***")
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "***")
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***")
+    .replace(/(Authorization["']?\s*[:=]\s*["']?(?:Bearer\s+)?)[A-Za-z0-9._-]+/gi, "$1***");
 }

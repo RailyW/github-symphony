@@ -1,0 +1,18 @@
+{"file": ".trellis/spec/shared/index.md", "reason": "共享规范索引，覆盖代码质量、TypeScript 和项目上下文。"}
+{"file": ".trellis/spec/shared/project-context.md", "reason": "确认本项目基于 upstream symphony 的产品约束和权限边界。"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "实现时遵守通用代码质量规则，尤其是避免无关重构和非空断言。"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "实现 React/Electron TypeScript 状态和 IPC 类型变更时保持类型安全。"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范索引，任务主要修改 Settings React UI。"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Settings 通过 Electron preload/main IPC 读取保存 token 状态和 discovery，需遵守 IPC 边界。"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "确保 renderer 不误用不可用浏览器 API 或阻塞式弹窗。"}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "自动 discovery 涉及 useEffect/useCallback 状态同步，需避免 React 常见陷阱。"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Settings 页面需要正确管理 token 掩码、保存语义和 discovery 状态。"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "Select 和表单空态展示需符合组件语义和用户体验规范。"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "SettingsLoadResult、token display hint 等类型如有调整需保持显式类型。"}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "实现后需满足前端质量要求。"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Electron main process 和本地 API 属于后端/主进程边界，需要参考总体规范。"}
+{"file": ".trellis/spec/backend/environment.md", "reason": "保存 token 位于 Electron userData/safeStorage，需尊重环境隔离。"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "任何 discovery/token 错误日志不得泄露 PAT。"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "如修改 Electron main process，需遵守主进程质量和导入规则。"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "实现前检查已有模式、状态边界和可复用逻辑。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "任务横跨 renderer、preload/main IPC、安全存储和后端 discovery。"}

@@ -70,6 +70,99 @@ declare global {
 }
 ```
 
+## Scenario: Settings Saved PAT Discovery
+
+### 1. Scope / Trigger
+
+- Trigger: Settings needs to show and use a previously saved GitHub PAT without exposing the secret to the renderer.
+- Applies when a renderer settings page calls Electron preload APIs backed by `safeStorage`, local settings JSON, or GitHub discovery endpoints.
+- This is a cross-layer contract: renderer form state -> preload IPC -> Electron main secret store -> backend discovery API -> renderer select state.
+
+### 2. Signatures
+
+- Renderer load:
+  - `window.symphonySettings.load(): Promise<SettingsLoadResult>`
+  - `SettingsLoadResult = { settings: AppSettings; token: TokenStatus; settingsPath: string }`
+  - `TokenStatus = { configured: boolean; encryptionAvailable: boolean }`
+- Token update:
+  - `window.symphonySettings.save(settings: AppSettings, tokenUpdate: TokenUpdate): Promise<SettingsLoadResult>`
+  - `TokenUpdate = { mode: "unchanged" } | { mode: "set"; value: string } | { mode: "clear" }`
+- Discovery:
+  - `discoverConnect(request: GitHubDiscoveryRequest): Promise<GitHubDiscoveryConnectResult>`
+  - `discoverProjects(request: GitHubDiscoveryRequest & { owner_type: "org" | "user"; owner: string }): Promise<{ projects: GitHubProjectOption[]; warnings: string[] }>`
+  - `discoverProject(request: GitHubDiscoveryRequest & { owner_type: "org" | "user"; owner: string; project_number: number }): Promise<GitHubProjectDiscoveryResult>`
+  - `GitHubDiscoveryRequest = { github_token?: string; use_saved_token?: boolean; api_base_url?: string; graphql_url?: string }`
+
+### 3. Contracts
+
+- Renderer must never receive the real saved PAT. It only receives `TokenStatus.configured`.
+- If `TokenStatus.configured === true`, the password input may show a fixed mask such as `************`.
+- Any value matching `/^\*{8,}$/` is a display mask, not a real token.
+- Saving a display mask must produce `{ mode: "unchanged" }`, never `{ mode: "set", value: "************" }`.
+- Manually entered PAT text has priority over the saved token for discovery and save.
+- If no new PAT is entered and a saved token exists, discovery defaults to the saved token even when the user clicks the main connect action.
+- Electron main must also reject mask-like values as real secrets before saving or forwarding discovery requests.
+- Startup Settings discovery should populate owner and Project select options from GitHub, but the selects must include saved `settings.tracker.owner` and `settings.tracker.project_number` as fallback options before and after discovery.
+- Error text and log payloads that may contain PATs or Authorization headers must be redacted before reaching renderer UI, Electron logs, or diagnostics.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Saved token exists | Show password mask and auto-run saved-token discovery when Settings opens. |
+| Saved token missing and input empty | Disable discovery or return a clear "PAT required" error. |
+| Input is mask only | Treat as unchanged; use saved token for discovery if available. |
+| User enters new PAT | Use input PAT for discovery; save with `mode: "set"` only on Save / Save & Apply. |
+| User clears token | Use `mode: "clear"` on Save / Save & Apply; do not leak the prior PAT. |
+| Discovery succeeds | Replace/merge option lists and select saved owner/project when present, otherwise use a reasonable GitHub result default. |
+| Discovery fails | Keep saved owner/project fallback options visible and show a redacted error. |
+| Backend returns an error body containing a secret | Redact before logging and before throwing to renderer. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `token.configured === true`, renderer shows `************`, auto discovery sends `{ use_saved_token: true }`, owner/project selects display current saved settings immediately and discovered options after success.
+- Base: no saved token, renderer shows an empty password input, discovery waits for a user-provided PAT.
+- Bad: renderer stores the real PAT in React state after loading settings, saves the mask as the PAT, logs raw backend error bodies, or leaves owner/project selects empty while saved settings exist.
+
+### 6. Tests Required
+
+- Unit or component assertions:
+  - Mask value serializes to `{ mode: "unchanged" }`.
+  - New PAT serializes to `{ mode: "set", value: "<new token>" }`.
+  - Empty value with saved token defaults discovery to saved-token mode.
+  - Owner/project option builders include saved settings as fallbacks when discovery arrays are empty.
+- Main-process assertions:
+  - Mask-like `TokenUpdate.value` does not overwrite the encrypted secret.
+  - Discovery token resolution ignores mask-like values and falls back to the saved token.
+  - Backend error logging redacts PAT and Authorization-like strings.
+- Integration or manual QA:
+  - Open Settings with a saved PAT and confirm automatic discovery shows the active owner and Project.
+  - Simulate discovery failure and confirm saved owner/project remain visible.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+const tokenInput = "";
+const tokenUpdate = tokenInput ? { mode: "set", value: tokenInput } : { mode: "unchanged" };
+await discoverConnect({ github_token: tokenInput });
+```
+
+This leaves the UI blank after restart and cannot distinguish "saved token exists" from "no token configured".
+
+#### Correct
+
+```typescript
+const tokenInput = tokenStatus.configured ? SAVED_TOKEN_MASK : "";
+const tokenUpdate = isSavedTokenMaskValue(tokenInput)
+  ? { mode: "unchanged" }
+  : { mode: "set", value: tokenInput.trim() };
+await discoverConnect({ use_saved_token: tokenStatus.configured });
+```
+
+This preserves the secret boundary while making the saved-token state visible and usable.
+
 ---
 
 ## Data Refresh Subscription Pattern

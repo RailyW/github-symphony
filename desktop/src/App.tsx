@@ -19,7 +19,7 @@ import {
   Settings,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   exportLogBundle,
   fetchLogConfig,
@@ -45,6 +45,7 @@ import type {
   AppSettings,
   EventRecord,
   GitHubDiscoveryConnectResult,
+  GitHubDiscoveryRequest,
   GitHubOwnerOption,
   GitHubProjectDiscoveryResult,
   GitHubProjectFieldOption,
@@ -62,6 +63,13 @@ import type {
 
 type PageKey = "dashboard" | "settings" | "logs" | "help";
 type SettingsTab = "github" | "workspace" | "agent" | "completion" | "codex" | "tools" | "logging" | "prompt";
+type DiscoverySource = "input" | "saved";
+type DiscoveryRequestContext = {
+  request: GitHubDiscoveryRequest;
+  source: DiscoverySource;
+};
+
+const SAVED_TOKEN_MASK = "************";
 
 // 函数说明：桌面仪表盘根组件，负责页面导航和共享状态加载。
 export function App(): JSX.Element {
@@ -314,9 +322,23 @@ function SettingsPage({
   onApplied: () => Promise<void>;
 }): JSX.Element {
   const [tab, setTab] = useState<SettingsTab>("github");
-  const [tokenInput, setTokenInput] = useState("");
+  const [tokenInput, setTokenInput] = useState(() => (tokenStatus.configured ? SAVED_TOKEN_MASK : ""));
   const [tokenMode, setTokenMode] = useState<TokenUpdate["mode"]>("unchanged");
   const [busy, setBusy] = useState(false);
+
+  // 逻辑说明：保存 token 存在时只把固定掩码放进表单展示，保存语义仍保持 unchanged。
+  useEffect(() => {
+    if (tokenMode !== "unchanged") {
+      return;
+    }
+    if (tokenStatus.configured && !tokenInput) {
+      setTokenInput(SAVED_TOKEN_MASK);
+      return;
+    }
+    if (!tokenStatus.configured && isSavedTokenMaskValue(tokenInput)) {
+      setTokenInput("");
+    }
+  }, [tokenInput, tokenMode, tokenStatus.configured]);
 
   // 函数说明：统一执行设置动作，保证按钮 busy 和错误提示一致。
   const runAction = useCallback(
@@ -507,8 +529,11 @@ function GitHubSettings({
   onError: (message: string | null) => void;
   onChange: (settings: AppSettings) => void;
 }): JSX.Element {
-  const [owners, setOwners] = useState<GitHubOwnerOption[]>([]);
-  const [projects, setProjects] = useState<GitHubProjectOption[]>([]);
+  const [owners, setOwners] = useState<GitHubOwnerOption[]>(() => [ownerOptionFromSettings(settings)]);
+  const [projects, setProjects] = useState<GitHubProjectOption[]>(() => {
+    const savedProject = projectOptionFromSettings(settings);
+    return savedProject ? [savedProject] : [];
+  });
   const [projectDiscovery, setProjectDiscovery] = useState<GitHubProjectDiscoveryResult | null>(null);
   const [selectedOwnerKey, setSelectedOwnerKey] = useState(
     `${settings.tracker.owner_type}:${settings.tracker.owner}`,
@@ -516,32 +541,86 @@ function GitHubSettings({
   const [selectedProjectNumber, setSelectedProjectNumber] = useState(
     String(settings.tracker.project_number || ""),
   );
-  const [discoverySource, setDiscoverySource] = useState<"input" | "saved">("input");
+  const [discoverySource, setDiscoverySource] = useState<DiscoverySource>(
+    tokenStatus.configured ? "saved" : "input",
+  );
+  const [hasStartedAutoDiscovery, setHasStartedAutoDiscovery] = useState(false);
   const [busyDiscovery, setBusyDiscovery] = useState(false);
+  const discoveryRunRef = useRef(0);
+  const ownerOptions = useMemo(
+    () => mergeOwnerOptions(owners, [ownerOptionFromSettings(settings)]),
+    [owners, settings.tracker.owner, settings.tracker.owner_type],
+  );
+  const projectOptions = useMemo(() => {
+    const savedProject = projectOptionFromSettings(settings);
+    return savedProject ? mergeProjectOptions(projects, [savedProject]) : projects;
+  }, [projects, settings.tracker.owner, settings.tracker.owner_type, settings.tracker.project_number]);
+  const hasDiscoveryToken = canUseDiscoveryToken(tokenMode, tokenInput, tokenStatus);
+
+  // 逻辑说明：settings 被导入或 discovery 更新后，确保下拉框始终包含当前落盘配置对应的 owner/project。
+  useEffect(() => {
+    const savedOwner = ownerOptionFromSettings(settings);
+    const savedProject = projectOptionFromSettings(settings);
+    setOwners((currentOwners) => mergeOwnerOptions(currentOwners, [savedOwner]));
+    setProjects((currentProjects) => {
+      const sameOwnerProjects = currentProjects.filter(
+        (project) => project.owner === settings.tracker.owner
+          && project.owner_type === settings.tracker.owner_type,
+      );
+      return savedProject ? mergeProjectOptions(sameOwnerProjects, [savedProject]) : sameOwnerProjects;
+    });
+    setSelectedOwnerKey(ownerOptionKey(savedOwner));
+    setSelectedProjectNumber(savedProject ? String(savedProject.number) : "");
+  }, [settings.tracker.owner, settings.tracker.owner_type, settings.tracker.project_number]);
+
+  // 逻辑说明：组件卸载时让未完成的 discovery 响应失效，避免旧请求回写已关闭页面。
+  useEffect(() => () => {
+    discoveryRunRef.current += 1;
+  }, []);
 
   // 函数说明：拼装 discovery 请求；临时 PAT 和已保存 token 二选一，不写入 settings 文件。
   const buildDiscoveryRequest = useCallback(
-    (source: "input" | "saved") => ({
-      github_token: source === "input" ? tokenInput.trim() : undefined,
-      use_saved_token: source === "saved",
-      api_base_url: settings.tracker.api_base_url,
-      graphql_url: settings.tracker.graphql_url,
-    }),
-    [settings.tracker.api_base_url, settings.tracker.graphql_url, tokenInput],
+    (preferredSource: DiscoverySource): DiscoveryRequestContext => {
+      const source = discoverySourceForForm(preferredSource, tokenMode, tokenInput, tokenStatus);
+      const token = tokenValueForDiscovery(tokenMode, tokenInput);
+      return {
+        source,
+        request: {
+          github_token: source === "input" ? token : undefined,
+          use_saved_token: source === "saved",
+          api_base_url: settings.tracker.api_base_url,
+          graphql_url: settings.tracker.graphql_url,
+        },
+      };
+    },
+    [
+      settings.tracker.api_base_url,
+      settings.tracker.graphql_url,
+      tokenInput,
+      tokenMode,
+      tokenStatus,
+    ],
   );
 
   // 函数说明：统一执行 discovery 动作，避免多处重复 busy/error 处理。
   const runDiscovery = useCallback(
-    async (action: () => Promise<void>) => {
+    async (action: (isCurrentRun: () => boolean) => Promise<void>) => {
+      const runId = discoveryRunRef.current + 1;
+      discoveryRunRef.current = runId;
+      const isCurrentRun = (): boolean => discoveryRunRef.current === runId;
       setBusyDiscovery(true);
       onError(null);
       onMessage(null);
       try {
-        await action();
+        await action(isCurrentRun);
       } catch (caught) {
-        onError(caught instanceof Error ? caught.message : String(caught));
+        if (isCurrentRun()) {
+          onError(caught instanceof Error ? caught.message : String(caught));
+        }
       } finally {
-        setBusyDiscovery(false);
+        if (isCurrentRun()) {
+          setBusyDiscovery(false);
+        }
       }
     },
     [onError, onMessage],
@@ -549,18 +628,27 @@ function GitHubSettings({
 
   // 函数说明：按 owner 读取 Project 列表，并在可能时自动选择当前配置或第一个 Project。
   const loadProjectsForOwner = useCallback(
-    async (owner: GitHubOwnerOption, source: "input" | "saved") => {
+    async (
+      owner: GitHubOwnerOption,
+      preferredSource: DiscoverySource,
+      isCurrentRun: () => boolean = () => true,
+    ): Promise<boolean> => {
+      const discovery = buildDiscoveryRequest(preferredSource);
       const result = await discoverProjects({
-        ...buildDiscoveryRequest(source),
+        ...discovery.request,
         owner_type: owner.owner_type,
         owner: owner.login,
       });
-      setProjects(result.projects);
+      if (!isCurrentRun()) {
+        return false;
+      }
+      const nextProjects = projectOptionsForOwner(settings, owner, result.projects);
+      setProjects(nextProjects);
       setProjectDiscovery(null);
 
-      const preferredProject = result.projects.find(
+      const preferredProject = nextProjects.find(
         (project) => project.number === settings.tracker.project_number,
-      ) || result.projects[0];
+      ) || nextProjects[0];
       setSelectedProjectNumber(preferredProject ? String(preferredProject.number) : "");
 
       updateSettings(onChange, settings, (draft) => {
@@ -570,30 +658,39 @@ function GitHubSettings({
           draft.tracker.project_number = preferredProject.number;
         }
       });
+      return true;
     },
     [buildDiscoveryRequest, onChange, settings],
   );
 
   // 函数说明：连接 GitHub 并读取 owner 列表，随后自动加载当前或默认 owner 的 Projects。
   const handleConnect = useCallback(
-    async (source: "input" | "saved") => {
-      await runDiscovery(async () => {
-        setDiscoverySource(source);
+    async (preferredSource: DiscoverySource, options: { showMessage?: boolean } = {}) => {
+      await runDiscovery(async (isCurrentRun) => {
+        const discovery = buildDiscoveryRequest(preferredSource);
+        setDiscoverySource(discovery.source);
         const result: GitHubDiscoveryConnectResult = await discoverConnect(
-          buildDiscoveryRequest(source),
+          discovery.request,
         );
-        setOwners(result.owners);
+        if (!isCurrentRun()) {
+          return;
+        }
+        const savedOwner = ownerOptionFromSettings(settings);
+        const nextOwners = mergeOwnerOptions(result.owners, [savedOwner]);
+        setOwners(nextOwners);
 
         const currentOwner = result.owners.find(
-          (owner) => `${owner.owner_type}:${owner.login}` === selectedOwnerKey,
-        ) || result.owners[0];
-        if (!currentOwner) {
-          throw new Error("当前 PAT 未返回可用 owner，请检查 token 权限。");
+          (owner) => ownerOptionKey(owner) === ownerOptionKey(savedOwner),
+        ) || result.owners[0] || savedOwner;
+        const nextOwnerKey = ownerOptionKey(currentOwner);
+        const loadedProjects = await loadProjectsForOwner(currentOwner, discovery.source, isCurrentRun);
+        if (!loadedProjects || !isCurrentRun()) {
+          return;
         }
-        const nextOwnerKey = `${currentOwner.owner_type}:${currentOwner.login}`;
         setSelectedOwnerKey(nextOwnerKey);
-        await loadProjectsForOwner(currentOwner, source);
-        onMessage(`已连接 GitHub：${result.viewer.login}`);
+        if (options.showMessage !== false) {
+          onMessage(`已连接 GitHub：${result.viewer.login}`);
+        }
       });
     },
     [
@@ -601,29 +698,38 @@ function GitHubSettings({
       loadProjectsForOwner,
       onMessage,
       runDiscovery,
-      selectedOwnerKey,
+      settings,
     ],
   );
+
+  // 逻辑说明：打开 GitHub Settings 且已有保存 token 时，自动用保存 token 预热 owner/project 选项。
+  useEffect(() => {
+    if (hasStartedAutoDiscovery || !tokenStatus.configured || tokenMode === "clear") {
+      return;
+    }
+    setHasStartedAutoDiscovery(true);
+    void handleConnect("saved", { showMessage: false });
+  }, [handleConnect, hasStartedAutoDiscovery, tokenMode, tokenStatus.configured]);
 
   // 函数说明：用户切换 owner 后刷新 Project 列表。
   const handleOwnerChange = useCallback(
     async (ownerKey: string) => {
       setSelectedOwnerKey(ownerKey);
-      const owner = owners.find((item) => `${item.owner_type}:${item.login}` === ownerKey);
+      const owner = ownerOptions.find((item) => ownerOptionKey(item) === ownerKey);
       if (!owner) {
         return;
       }
-      await runDiscovery(async () => {
-        await loadProjectsForOwner(owner, discoverySource);
+      await runDiscovery(async (isCurrentRun) => {
+        await loadProjectsForOwner(owner, discoverySource, isCurrentRun);
       });
     },
-    [discoverySource, loadProjectsForOwner, owners, runDiscovery],
+    [discoverySource, loadProjectsForOwner, ownerOptions, runDiscovery],
   );
 
   // 函数说明：读取 Project 字段和仓库，并用推荐值填充 tracker 配置。
   const handleInspectProject = useCallback(async () => {
-    await runDiscovery(async () => {
-      const owner = owners.find((item) => `${item.owner_type}:${item.login}` === selectedOwnerKey);
+    await runDiscovery(async (isCurrentRun) => {
+      const owner = ownerOptions.find((item) => ownerOptionKey(item) === selectedOwnerKey);
       if (!owner) {
         throw new Error("请先选择 GitHub owner。");
       }
@@ -631,12 +737,16 @@ function GitHubSettings({
       if (!projectNumber) {
         throw new Error("请先选择 GitHub Project。");
       }
+      const discovery = buildDiscoveryRequest(discoverySource);
       const result = await discoverProject({
-        ...buildDiscoveryRequest(discoverySource),
+        ...discovery.request,
         owner_type: owner.owner_type,
         owner: owner.login,
         project_number: projectNumber,
       });
+      if (!isCurrentRun()) {
+        return;
+      }
       const statusField = chooseStatusField(result.status_fields, settings.tracker.status_field);
       if (!statusField) {
         throw new Error("该 Project 没有 single-select Status 字段，请先在 GitHub Project 中创建。");
@@ -696,12 +806,29 @@ function GitHubSettings({
     discoverySource,
     onChange,
     onMessage,
-    owners,
+    ownerOptions,
     runDiscovery,
     selectedOwnerKey,
     selectedProjectNumber,
     settings,
   ]);
+
+  // 函数说明：用户没有输入新 PAT 时恢复掩码展示，同时保持保存语义为 unchanged。
+  const handleTokenBlur = useCallback(() => {
+    if (tokenStatus.configured && tokenMode === "unchanged" && !tokenInput.trim()) {
+      onTokenInput(SAVED_TOKEN_MASK);
+    }
+  }, [onTokenInput, tokenInput, tokenMode, tokenStatus.configured]);
+
+  // 函数说明：把密码框编辑值归一化为真实新 PAT 或空值，固定掩码永远不进入 set 模式。
+  const handleTokenInputChange = useCallback(
+    (value: string) => {
+      const normalized = normalizeTokenInputEdit(value);
+      onTokenInput(normalized);
+      onTokenMode(tokenValueForDiscovery("set", normalized) ? "set" : "unchanged");
+    },
+    [onTokenInput, onTokenMode],
+  );
 
   const statusField = projectDiscovery
     ? chooseStatusField(projectDiscovery.status_fields, settings.tracker.status_field)
@@ -732,18 +859,16 @@ function GitHubSettings({
         <input
           type="password"
           value={tokenInput}
-          placeholder="粘贴 PAT 后点击 Connect；只有 Save 或 Save & Apply 才会保存"
-          onChange={(event) => {
-            onTokenInput(event.target.value);
-            onTokenMode(event.target.value ? "set" : "unchanged");
-          }}
+          placeholder="粘贴新 PAT 或使用已保存 token；只有 Save 或 Save & Apply 才会保存"
+          onBlur={handleTokenBlur}
+          onChange={(event) => handleTokenInputChange(event.target.value)}
         />
         <div className="buttonRow">
           <button
             className="primaryButton"
             type="button"
             onClick={() => void handleConnect("input")}
-            disabled={busyDiscovery || !tokenInput.trim()}
+            disabled={busyDiscovery || !hasDiscoveryToken}
           >
             Connect PAT
           </button>
@@ -769,7 +894,7 @@ function GitHubSettings({
         <SelectField
           label="Owner"
           value={selectedOwnerKey}
-          options={owners.map((owner) => `${owner.owner_type}:${owner.login}`)}
+          options={ownerOptions.map((owner) => ownerOptionKey(owner))}
           onChange={(value) => void handleOwnerChange(value)}
         />
         <label className="field">
@@ -784,7 +909,7 @@ function GitHubSettings({
               });
             }}
           >
-            {projects.map((project) => (
+            {projectOptions.map((project) => (
               <option value={String(project.number)} key={project.id}>
                 #{project.number} {project.title}{project.closed ? " (closed)" : ""}
               </option>
@@ -2181,13 +2306,144 @@ function isHighTrustPresetName(value: string): boolean {
   return ["high_trust", "high-trust", "pr_full_auto", "pr-before-full-auto"].includes(normalized);
 }
 
-// 函数说明：根据表单状态生成 token 更新语义。
+// 函数说明：判断表单中的 token 值是否只是已保存 token 的固定展示掩码。
+function isSavedTokenMaskValue(value: string): boolean {
+  return /^\*{8,}$/.test(value.trim());
+}
+
+// 函数说明：从密码框编辑值中剥离固定掩码，防止用户在掩码末尾输入时保存出伪 token。
+function normalizeTokenInputEdit(value: string): string {
+  if (/^\*+$/.test(value.trim())) {
+    return "";
+  }
+  if (value.startsWith(SAVED_TOKEN_MASK)) {
+    return value.slice(SAVED_TOKEN_MASK.length);
+  }
+  return value;
+}
+
+// 函数说明：只在用户明确输入新 PAT 时返回可用于保存或 discovery 的真实 token。
+function tokenValueForDiscovery(mode: TokenUpdate["mode"], value: string): string {
+  const trimmed = value.trim();
+  if (mode !== "set" || !trimmed || isSavedTokenMaskValue(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
+// 函数说明：判断当前表单是否有可用于 GitHub discovery 的新 token 或已保存 token。
+function canUseDiscoveryToken(
+  mode: TokenUpdate["mode"],
+  value: string,
+  tokenStatus: TokenStatus,
+): boolean {
+  return Boolean(tokenValueForDiscovery(mode, value) || tokenStatus.configured);
+}
+
+// 函数说明：手动 discovery 优先使用新输入 PAT；没有新 PAT 时自动回退到已保存 token。
+function discoverySourceForForm(
+  preferredSource: DiscoverySource,
+  mode: TokenUpdate["mode"],
+  value: string,
+  tokenStatus: TokenStatus,
+): DiscoverySource {
+  if (preferredSource === "saved") {
+    return "saved";
+  }
+  if (tokenValueForDiscovery(mode, value)) {
+    return "input";
+  }
+  return tokenStatus.configured ? "saved" : "input";
+}
+
+// 函数说明：把当前 settings 中保存的 owner 转成 discovery 下拉框 fallback 选项。
+function ownerOptionFromSettings(settings: AppSettings): GitHubOwnerOption {
+  return {
+    owner_type: settings.tracker.owner_type,
+    login: settings.tracker.owner,
+    display_name: "Saved owner",
+  };
+}
+
+// 函数说明：为 owner 选项生成稳定 key，和原有 select value 格式保持兼容。
+function ownerOptionKey(owner: GitHubOwnerOption): string {
+  return `${owner.owner_type}:${owner.login}`;
+}
+
+// 函数说明：把当前 settings 中保存的 project number 转成 Project 下拉框 fallback 选项。
+function projectOptionFromSettings(settings: AppSettings): GitHubProjectOption | null {
+  if (!settings.tracker.project_number) {
+    return null;
+  }
+  return {
+    id: `saved:${settings.tracker.owner_type}:${settings.tracker.owner}:${settings.tracker.project_number}`,
+    number: settings.tracker.project_number,
+    title: `Saved project #${settings.tracker.project_number}`,
+    owner: settings.tracker.owner,
+    owner_type: settings.tracker.owner_type,
+    closed: false,
+    updated_at: null,
+  };
+}
+
+// 函数说明：合并 owner 选项并去重，保留 GitHub discovery 返回值和本地 settings fallback。
+function mergeOwnerOptions(...groups: GitHubOwnerOption[][]): GitHubOwnerOption[] {
+  const seen = new Set<string>();
+  const merged: GitHubOwnerOption[] = [];
+  for (const group of groups) {
+    for (const owner of group) {
+      if (!owner.login.trim()) {
+        continue;
+      }
+      const key = ownerOptionKey(owner);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(owner);
+    }
+  }
+  return merged;
+}
+
+// 函数说明：合并 Project 选项并按 owner/number 去重，避免保存配置和 discovery 结果重复显示。
+function mergeProjectOptions(...groups: GitHubProjectOption[][]): GitHubProjectOption[] {
+  const seen = new Set<string>();
+  const merged: GitHubProjectOption[] = [];
+  for (const group of groups) {
+    for (const project of group) {
+      const key = `${project.owner_type}:${project.owner}:${project.number}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(project);
+    }
+  }
+  return merged;
+}
+
+// 函数说明：针对指定 owner 合并 Projects，只有 owner 匹配时才附加当前 settings 的 project fallback。
+function projectOptionsForOwner(
+  settings: AppSettings,
+  owner: GitHubOwnerOption,
+  discoveredProjects: GitHubProjectOption[],
+): GitHubProjectOption[] {
+  const savedProject = projectOptionFromSettings(settings);
+  if (!savedProject || ownerOptionKey(owner) !== ownerOptionKey(ownerOptionFromSettings(settings))) {
+    return discoveredProjects;
+  }
+  return mergeProjectOptions(discoveredProjects, [savedProject]);
+}
+
+// 函数说明：根据表单状态生成 token 更新语义，固定掩码始终视为未改动。
 function tokenUpdateFromForm(mode: TokenUpdate["mode"], value: string): TokenUpdate {
   if (mode === "clear") {
     return { mode: "clear" };
   }
-  if (mode === "set" && value.trim()) {
-    return { mode: "set", value: value.trim() };
+  const token = tokenValueForDiscovery(mode, value);
+  if (token) {
+    return { mode: "set", value: token };
   }
   return { mode: "unchanged" };
 }

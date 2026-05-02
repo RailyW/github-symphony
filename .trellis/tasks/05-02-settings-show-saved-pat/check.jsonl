@@ -1,0 +1,14 @@
+{"file": ".trellis/spec/shared/index.md", "reason": "质量检查时确认共享规范覆盖范围。"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "检查通用质量、最小改动和安全边界。"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "检查 TypeScript 类型安全。"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "质量检查时确认前端规范覆盖范围。"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "检查 renderer/main IPC 边界和 token 不泄露约束。"}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "检查自动 discovery 的 effect 依赖、状态同步和竞态。"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "检查 Settings token 掩码、保存语义和 discovery 状态管理。"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "检查 owner/project select 在成功和失败状态下都有合理展示。"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "检查前端类型改动。"}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "执行最终前端质量审核。"}
+{"file": ".trellis/spec/backend/environment.md", "reason": "检查 safeStorage/userData 行为未被破坏。"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "检查日志和错误提示不泄露 PAT。"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "如主进程有改动，检查质量约束。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 renderer、IPC、安全存储和 discovery 数据流一致性。"}

@@ -250,6 +250,69 @@ function MyComponent() {
 
 ---
 
+## Latest-Request Guard for Auto-Loaded Settings Panels
+
+Settings panels that auto-load remote data on mount can overlap with user-triggered refreshes, owner changes, or detail inspections. Use a monotonically increasing request id stored in `useRef` so only the latest request can write state, errors, or busy flags.
+
+```tsx
+const requestRunRef = useRef(0);
+
+const runRequest = useCallback(async (action: (isCurrentRun: () => boolean) => Promise<void>) => {
+  const runId = requestRunRef.current + 1;
+  requestRunRef.current = runId;
+  const isCurrentRun = (): boolean => requestRunRef.current === runId;
+
+  setBusy(true);
+  setError(null);
+  try {
+    await action(isCurrentRun);
+  } catch (error) {
+    if (isCurrentRun()) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    if (isCurrentRun()) {
+      setBusy(false);
+    }
+  }
+}, []);
+
+useEffect(() => () => {
+  requestRunRef.current += 1;
+}, []);
+```
+
+**Required behavior**:
+
+- Check `isCurrentRun()` after every awaited call before mutating React state.
+- Invalidate pending requests on unmount.
+- Guard error and busy-state writes, not just success writes.
+- Keep local fallback state visible while remote discovery is pending or failing.
+
+**Wrong**:
+
+```tsx
+const result = await discoverProjects(owner);
+setProjects(result.projects);
+setBusy(false);
+```
+
+An older request can overwrite the user's newer owner/project selection.
+
+**Correct**:
+
+```tsx
+const result = await discoverProjects(owner);
+if (!isCurrentRun()) {
+  return;
+}
+setProjects(result.projects);
+```
+
+This keeps auto discovery, manual refresh, and dependent selects consistent.
+
+---
+
 ## Tabs + Navigation Pattern
 
 When implementing a tab-based interface (like VS Code, Obsidian), use **tabs as the single source of truth** for navigation.

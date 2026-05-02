@@ -442,6 +442,9 @@ async function updateGithubToken(update: TokenUpdate): Promise<void> {
     await writeJsonFile(secretsPath(), secrets);
     return;
   }
+  if (isMaskedTokenPlaceholder(update.value)) {
+    return;
+  }
 
   if (!safeStorage.isEncryptionAvailable()) {
     encryptionAvailableHint = false;
@@ -475,9 +478,9 @@ async function backendJson<T>(route: string, init?: RequestInit): Promise<T> {
     writeElectronLog("ERROR", "electron.backend_json_failed", "后端 API 请求失败", {
       route,
       status: response.status,
-      body: text.slice(0, 1000),
+      body: redactSecretText(text).slice(0, 1000),
     });
-    throw new Error(String(parsed.detail || text || `HTTP ${response.status}`));
+    throw new Error(redactSecretText(String(parsed.detail || text || `HTTP ${response.status}`)));
   }
   return parsed as T;
 }
@@ -525,17 +528,20 @@ async function applySettingsToBackend(settings: Record<string, unknown>): Promis
   });
 }
 
-// 函数说明：为 discovery 请求解析 token；临时 PAT 优先，显式请求时才读取已保存 token。
+// 函数说明：判断 renderer 传来的 token 字段是否只是保存态掩码，避免把掩码当成真实 PAT。
+function isMaskedTokenPlaceholder(value: string): boolean {
+  return /^\*{8,}$/.test(value.trim());
+}
+
+// 函数说明：为 discovery 请求解析 token；临时 PAT 优先，没有新 PAT 时默认读取已保存 token。
 async function resolveDiscoveryToken(request: DiscoveryRequest): Promise<string> {
   const token = String(request.github_token || "").trim();
-  if (token) {
+  if (token && !isMaskedTokenPlaceholder(token)) {
     return token;
   }
-  if (request.use_saved_token) {
-    const savedToken = await readGithubToken();
-    if (savedToken) {
-      return savedToken;
-    }
+  const savedToken = await readGithubToken();
+  if (savedToken) {
+    return savedToken;
   }
   throw new Error("请先输入 GitHub PAT，或选择使用已保存 token。");
 }
