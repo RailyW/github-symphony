@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from symphony_github.codex.app_server import (
     CodexAppServerClient,
+    approval_policy_is_never,
     auto_approved_request_response,
     build_codex_path,
     codex_subprocess_env,
@@ -255,6 +256,36 @@ Prompt body
         self.assertIsNone(document.config.workspace.hooks.after_create)
         self.assertEqual(settings["workspace"]["checkout"]["repositories"], {})
 
+    # 函数说明：测试默认 prompt 明确声明无人值守 PR 前自治边界，避免 agent 等待人工确认。
+    def test_default_prompt_declares_unattended_pr_autonomy(self) -> None:
+        prompt = str(default_app_settings()["prompt_template"])
+
+        for expected in [
+            "non-interactive",
+            "无人值守",
+            "runner 无法接收",
+            "ok",
+            "行",
+            "continue",
+            "确认",
+            "commit",
+            "push task branch",
+            "create/update PR",
+            "{{ workflow.success_state }}",
+            "## Codex Workpad",
+            "CI/checks 无法判断",
+            "除非当前 Project Status 是 `Merging`，不要自动 merge",
+        ]:
+            self.assertIn(expected, prompt)
+
+    # 函数说明：测试新建 App settings 使用 high-trust preset，后端归一化为 app-server 的 never。
+    def test_default_app_settings_uses_high_trust_approval_preset(self) -> None:
+        settings = default_app_settings()
+        document = normalize_app_settings(settings)
+
+        self.assertEqual(settings["codex"]["approval_policy"], {"preset": "high-trust"})
+        self.assertEqual(document.config.codex.approval_policy, "never")
+
     # 函数说明：测试只有 after_create 的旧 WORKFLOW 会保持 hook-only checkout 兼容模式。
     def test_hook_only_workflow_defaults_checkout_mode_to_hook(self) -> None:
         result = import_workflow_text(
@@ -379,6 +410,18 @@ Prompt body
         self.assertEqual(config.completion_policy.failure_state, "Rework")
         self.assertFalse(config.completion_policy.mark_done_after_successful_turn)
 
+    # 函数说明：测试默认 prompt 明确记录 non-interactive runner 和 PR 前授权边界。
+    def test_default_prompt_documents_unattended_pr_auth_boundary(self) -> None:
+        prompt = str(default_app_settings()["prompt_template"])
+
+        self.assertIn("non-interactive runner", prompt)
+        self.assertIn("无法接收 `ok` / `行` / `continue`", prompt)
+        self.assertIn("commit、push task branch、create/update PR 已授权", prompt)
+        self.assertIn("不得等待人工确认后再 commit、push 或创建/更新 PR", prompt)
+        self.assertIn("CI/checks 无法判断", prompt)
+        self.assertIn("把 Project Status 移到 `{{ workflow.success_state }}`", prompt)
+        self.assertIn("除非当前 Project Status 是 `Merging`，不要自动 merge", prompt)
+
     # 函数说明：测试显式 high-trust approval preset 会归一化为 Codex app-server 的 never。
     def test_high_trust_approval_preset_normalizes_to_never(self) -> None:
         config = build_config(
@@ -396,6 +439,27 @@ Prompt body
         )
 
         self.assertEqual(config.codex.approval_policy, "never")
+
+    # 函数说明：测试旧 settings 缺少 approval_policy 时不会被静默升级到高信任。
+    def test_missing_approval_policy_keeps_conservative_compatibility(self) -> None:
+        imported = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo]
+workspace:
+  root: /tmp/github-symphony-test
+---
+Prompt body
+"""
+        )
+        document = normalize_app_settings(imported.settings)
+
+        self.assertIsInstance(document.config.codex.approval_policy, dict)
+        self.assertIn("granular", document.config.codex.approval_policy)
 
     # 函数说明：测试自定义 Project 阶段可导入、归一化和导出，且成功目标不必属于 terminal。
     def test_custom_status_policy_allows_handoff_success_state(self) -> None:
@@ -776,6 +840,13 @@ class CodexAppServerClientTest(unittest.TestCase):
             tool_response["answers"]["mcp_tool_call_approval_1"]["answers"],
             ["Approve this Session"],
         )
+
+    # 函数说明：测试 app-server 直接收到 high-trust preset 时也会识别为 unattended 高信任。
+    def test_high_trust_preset_is_treated_as_never_by_app_server(self) -> None:
+        self.assertTrue(approval_policy_is_never({"preset": "high-trust"}))
+        self.assertTrue(approval_policy_is_never({"preset": "pr_full_auto"}))
+        self.assertTrue(approval_policy_is_never("high-trust"))
+        self.assertFalse(approval_policy_is_never({"granular": {"sandbox_approval": True}}))
 
     # 函数说明：测试 app-server 处理自动批准时会写入可观测事件。
     def test_never_approval_policy_emits_auto_approved_event(self) -> None:
@@ -1450,6 +1521,23 @@ class FakeTracker:
         return {"ok": True}
 
 
+class StateChangingTracker(FakeTracker):
+    """用于 AgentRunner 测试的状态变化 tracker。"""
+
+    # 函数说明：保存回查时要模拟的 GitHub Project 状态，避免从 agent 输出推断状态。
+    def __init__(self, items: List[WorkItem], state_after_fetch: str) -> None:
+        super().__init__(items)
+        self.state_after_fetch = state_after_fetch
+
+    # 函数说明：模拟 agent 已通过 GitHub 工具把 Project item 移到指定状态后的回查结果。
+    async def fetch_issue_states_by_ids(self, issue_ids: List[str]) -> Dict[str, WorkItem]:
+        wanted = set(issue_ids)
+        for item in self.items:
+            if item.id in wanted:
+                item.state = self.state_after_fetch
+        return await super().fetch_issue_states_by_ids(issue_ids)
+
+
 class FailingTracker(FakeTracker):
     """用于验证调度主循环异常隔离的假 tracker。"""
 
@@ -1624,8 +1712,9 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tracker.status_updates, [(item.project_item_id, "Human Review")])
             self.assertIn("Human Review", fake_codex.prompts[0])
 
-    # 函数说明：测试 agent_managed 完成策略不会由 App 自动写 Project Status。
-    async def test_agent_managed_completion_does_not_update_project_status(self) -> None:
+    # 函数说明：测试 agent_managed 不自动写 Project Status；
+    # 持续 active 且耗尽 max_turns 时触发诊断。
+    async def test_agent_managed_active_item_exhausts_max_turns_without_status_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = build_config(
                 {
@@ -1650,12 +1739,70 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
             )
             item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
             tracker = FakeTracker([item])
+            events = EventStore()
+            fake_codex = FakeCodexClient()
             runner = FakeAgentRunnerWithCodex(
                 config=config,
                 prompt_template="{{ workflow.completion_kind }}",
                 tracker=tracker,
-                events=EventStore(),
-                fake_codex=FakeCodexClient(),
+                events=events,
+                fake_codex=fake_codex,
+            )
+            run_record = RunRecord(
+                issue_id=item.id,
+                identifier=item.identifier,
+                state="running",
+                workspace="",
+            )
+
+            result = await runner.run(item, run_record)
+
+            self.assertTrue(result.should_continue)
+            self.assertEqual(item.state, "Todo")
+            self.assertEqual(tracker.status_updates, [])
+            self.assertIn("max_turns", result.error or "")
+            self.assertEqual(run_record.state, "failed")
+            self.assertIn("active state", run_record.last_error or "")
+            self.assertEqual(len(fake_codex.prompts), 1)
+            event_types = [event.event_type for event in events.recent()]
+            self.assertIn("runner.max_turns_exhausted", event_types)
+
+    # 函数说明：测试 agent_managed 模式下任务被移动到 Human Review 后停止 continuation。
+    async def test_agent_managed_stops_when_item_moves_to_human_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                        "api_token": "fake-token",
+                        "status_options": ["Todo", "Human Review", "Done"],
+                        "active_states": ["Todo"],
+                        "handoff_states": ["Human Review"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": tmp, "checkout": {"mode": "none"}},
+                    "agent": {"max_turns": 3},
+                    "completion_policy": {
+                        "kind": "agent_managed",
+                        "success_state": "Human Review",
+                        "mark_done_after_successful_turn": False,
+                    },
+                }
+            )
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            tracker = StateChangingTracker([item], "Human Review")
+            events = EventStore()
+            fake_codex = FakeCodexClient()
+            runner = FakeAgentRunnerWithCodex(
+                config=config,
+                prompt_template="{{ workflow.success_state }}",
+                tracker=tracker,
+                events=events,
+                fake_codex=fake_codex,
             )
             run_record = RunRecord(
                 issue_id=item.id,
@@ -1667,8 +1814,12 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run(item, run_record)
 
             self.assertFalse(result.should_continue)
-            self.assertEqual(item.state, "Todo")
+            self.assertEqual(item.state, "Human Review")
             self.assertEqual(tracker.status_updates, [])
+            self.assertEqual(len(fake_codex.prompts), 1)
+            self.assertFalse(
+                any(event.event_type == "runner.max_turns_exhausted" for event in events.recent())
+            )
 
     # 函数说明：测试 Project Status 更新失败会标记 run failed，并交给调度器重试。
     async def test_completion_status_update_failure_requests_retry(self) -> None:

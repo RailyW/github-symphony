@@ -117,6 +117,25 @@ class AgentRunner:
                     if latest is None or latest.state not in self.config.tracker.active_states:
                         return RunnerResult(should_continue=False)
 
+                    if turn_index + 1 >= self.config.agent.max_turns:
+                        message = (
+                            "Codex turn 正常结束但任务仍处于 active state，"
+                            f"已耗尽 agent.max_turns={self.config.agent.max_turns}"
+                        )
+                        run_record.state = "failed"
+                        run_record.last_error = message
+                        run_record.touch()
+                        self.events.append(
+                            "runner.max_turns_exhausted",
+                            "Codex continuation 达到最大轮数但任务仍处于 active state",
+                            {
+                                "identifier": item.identifier,
+                                "state": latest.state,
+                                "max_turns": self.config.agent.max_turns,
+                            },
+                        )
+                        return RunnerResult(should_continue=True, error=message)
+
                     self.events.append(
                         "runner.continuation",
                         "Codex turn 正常结束但任务仍处于 active state，准备 continuation",

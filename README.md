@@ -79,6 +79,6 @@ npm run package
 ## 开发约定
 
 - 不由调度器把 `commit`、`push`、`merge` 或删除远端内容做成内置业务动作。
-- Codex agent 如果执行远端写操作，必须由 Prompt、approval policy、工具模式和 token 权限共同允许。
+- Codex agent 如果执行远端写操作，必须由 Prompt、approval policy、工具模式和 token 权限共同允许；新 settings 默认 high-trust preset 会自动批准 command、file、permissions、applyPatch、exec approval，并为工具 user-input 选择可继续项，只应配合隔离 workspace、受限 token 和可信 prompt 使用。
 - 默认禁止 force push、直接 push 默认分支、删除远端分支和用 PR closing keyword 自动关闭 issue；任务完成以 Project Status `Done` 为准。
 - 所有复杂模块都在模块目录内包含 README，便于审查职责边界。

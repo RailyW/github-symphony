@@ -69,3 +69,18 @@
 * 默认 merge method 按计划使用 `squash`，目前优先写入 prompt 约束；除非已有配置模式很容易扩展，否则不强制新增配置字段。
 * 代码注释需遵守仓库 AGENTS 约定，新增函数和复杂逻辑写清晰中文注释。
 
+## 2026-05-02 MVP 补齐记录
+
+* 默认 prompt 进一步明确无人值守 / non-interactive runner 语义：runner 无法接收 `ok`、`行`、`continue`、确认等回复；在当前 GitHub Project active 状态和当前 issue scope 内，已授权创建/复用任务分支、修改代码、运行验证、commit、push task branch、create/update PR，不应在 runner 内等待人工确认。
+* 新建 settings 默认使用 `approval_policy: { preset: "high-trust" }`，由后端归一化为 Codex app-server 已支持的 `never`。旧 settings 缺少 `approval_policy` 时保持保守 granular 策略，避免迁移时静默扩大权限。
+* UI/Help/docs 增加高信任风险说明：command、file、applyPatch、exec 和可识别工具 approval 会自动批准，只应配合隔离 workspace、受限 token 和可信 prompt 使用。
+* runner 在 `agent_managed` 模式下不解析 agent 输出文本；每个成功 turn 后只回查 GitHub Project item 最新状态。若最新状态已离开 active states（例如 `Human Review`）则停止 continuation；若耗尽 `agent.max_turns` 后仍 active，则把 run 标记为 failed，记录 `runner.max_turns_exhausted` 事件，并返回 `should_continue=True` 交给调度器重试/诊断。
+
+## MVP Refinement: Unattended PR-Before-Merge Boundary
+
+* `non-interactive runner` 不能接收 `ok`、`行`、`continue` 或其他人工确认输入；默认 prompt 必须禁止 agent 等待这类确认后才继续。
+* 在 GitHub Project item 仍处于 active state 且工作限定在当前 issue scope 内时，commit、push task branch、create/update PR 属于已授权的 PR 前动作；runner/App 不应因 app-server command/file/applyPatch/exec approval 再次阻塞。
+* 新建 App settings 和 `WORKFLOW.example.md` 使用高信任 approval posture（`pr_full_auto` / `high-trust` preset 或归一化后的 `never`）；已有 settings 如果没有显式 approval policy，继续保留旧的 granular 保守策略，避免升级时静默扩大权限。
+* 真实阻塞仅限外部条件，例如缺权限、缺 secret、仓库不可访问、GitHub/API/网络故障、CI/checks 无法判断；阻塞必须写入 Workpad。
+* 非 `Merging` active 阶段完成 PR 前置门禁后，agent 必须更新 `## Codex Workpad` 并把 Project Status 移到 `{{ workflow.success_state }}`。自动 merge 仍只允许在 Project Status 为 `Merging` 时执行。
+* runner 只通过 tracker 回查判断 item 是否仍在 active state，不解析 agent 输出驱动状态流转；耗尽 `agent.max_turns` 后仍 active 时记录 `runner.max_turns_exhausted` 并返回可重试结果。

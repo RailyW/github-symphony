@@ -1349,9 +1349,9 @@ function CodexSettings({
       />
       {isNeverApprovalPolicy(settings.codex.approval_policy) ? (
         <div className="inlineWarningBox">
-          approval_policy 为 never 或 high_trust preset 时，app-server 的 command、file-change、
-          applyPatch、exec 和可识别工具 approval prompt 会自动批准。只应在隔离工作区、受限 token 和可信
-          prompt 下使用。
+          approval_policy 为 never 或 high-trust preset 时，app-server 的 command、
+          file、permissions、applyPatch、exec approval 会自动批准，工具 user-input 会自动选择可继续项。
+          只应在隔离工作区、受限 token 和可信 prompt 下使用。
         </div>
       ) : null}
       <JsonField
@@ -1774,7 +1774,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "Checkout 默认按当前 Issue/PR 的 repository clone 到任务工作区；repository overrides 可为单个仓库改 clone URL、branch 或 path。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
         "Completion 默认使用 agent_managed；agent 在 PR 前置门禁达标后把 Project Status 移到 Human Review，App 不在成功 turn 后自动改状态。",
-        "approval_policy: never 或 high_trust preset 是高信任模式，会自动批准 app-server 的命令、文件变更和可识别工具 approval prompt；只应配合隔离工作区、受限 token 和可信 prompt 使用。",
+        "approval_policy: never 或 high-trust preset 是高信任模式，会自动批准 app-server 的 command、file、permissions、applyPatch、exec approval，并为工具 user-input 选择可继续项；只应配合隔离工作区、受限 token 和可信 prompt 使用。",
         "Logging 默认 DEBUG、保留 14 天，可在 Logs 页面查询和导出诊断包。",
         "Tools mode 为 read_only 时会拒绝 REST 写操作、GraphQL mutation 和 github_update_project_status；read_write 会允许这些写入口。",
       ],

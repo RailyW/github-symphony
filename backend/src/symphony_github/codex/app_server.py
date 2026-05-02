@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from symphony_github.core.config import CodexConfig
+from symphony_github.core.config import HIGH_TRUST_APPROVAL_PRESETS, CodexConfig
 from symphony_github.core.diagnostics import redact_text
 from symphony_github.core.events import EventStore
 
@@ -308,7 +308,7 @@ class CodexAppServerClient:
             result = auto_approved_request_response(method, params)
             self.events.append(
                 "codex.request.auto_approved",
-                "Codex 请求需要外部确认，已按 approval_policy=never 自动响应",
+                "Codex 请求需要外部确认，已按高信任 approval policy 自动响应",
                 {
                     "method": method,
                     "decision": result.get("decision") or result.get("action") or "answered",
@@ -467,10 +467,27 @@ def default_request_response(method: str) -> Dict[str, Any]:
 
 # 函数说明：判断 approval policy 是否明确进入高信任 unattended 模式。
 def approval_policy_is_never(approval_policy: Any) -> bool:
-    return approval_policy == "never"
+    if approval_policy == "never":
+        return True
+    if isinstance(approval_policy, str):
+        return _normalize_approval_preset_name(approval_policy) in HIGH_TRUST_APPROVAL_PRESETS
+    if isinstance(approval_policy, dict):
+        for key in ("preset", "autonomy_preset", "mode"):
+            candidate = approval_policy.get(key)
+            if (
+                isinstance(candidate, str)
+                and _normalize_approval_preset_name(candidate) in HIGH_TRUST_APPROVAL_PRESETS
+            ):
+                return True
+    return False
 
 
-# 函数说明：为 approval_policy=never 生成自动响应；只在用户显式配置 never 时调用。
+# 函数说明：归一化 approval preset 名称，确保 app-server 直接收到 preset 时也走高信任路径。
+def _normalize_approval_preset_name(value: str) -> str:
+    return value.strip().lower().replace(" ", "_")
+
+
+# 函数说明：为高信任 approval policy 生成自动响应；只在用户显式配置 never/preset 时调用。
 def auto_approved_request_response(method: str, params: Any) -> Dict[str, Any]:
     if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
         return {"decision": "acceptForSession"}
