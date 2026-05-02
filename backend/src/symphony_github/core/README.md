@@ -9,7 +9,7 @@
 - 将配置归一化为强约束的 dataclass。
 - 组装一次配置对应的 runtime 组件，供 CLI 和热重配 API 复用。
 - 管理内存事件流、当前运行快照和持久 JSONL 诊断日志。
-- 为每个 GitHub work item 创建独立工作区并执行 hooks。
+- 为每个 GitHub work item 创建独立工作区，按当前仓库执行内置 checkout，并执行 checkout 后 hooks。
 - 根据状态、依赖、并发槽和重试策略派发 Codex agent。
 - 将 GitHub Project Status 建模为 `active_states`、`handoff_states`、`terminal_states` 和 `blocked_states`，支持任意自定义阶段名。
 - 默认使用 `agent_managed` completion policy，由 prompt 和 GitHub 工具驱动 PR 前自治、`Human Review` 交接和 `Merging` land；也支持切换为 App 自动更新 Project Status。

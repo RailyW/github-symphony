@@ -1013,11 +1013,13 @@ function WorkspaceSettings({
   settings: AppSettings;
   onChange: (settings: AppSettings) => void;
 }): JSX.Element {
+  const checkout = settings.workspace.checkout;
+
   return (
     <>
       <SectionIntro
         title="Workspace"
-        text="每个派发任务会拥有独立工作区。after_create hook 会在新工作区内执行，常用于 clone 仓库。"
+        text="每个派发任务会拥有独立工作区。内置 checkout 会按当前任务仓库 clone，after_create hook 只负责后续扩展。"
       />
       <div className="formGrid">
         <TextField
@@ -1034,7 +1036,32 @@ function WorkspaceSettings({
             draft.workspace.cleanup_terminal_workspaces = value;
           })}
         />
+        <SelectField
+          label="Checkout Mode"
+          value={checkout.mode}
+          options={["clone", "hook", "none"]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.workspace.checkout.mode = value as AppSettings["workspace"]["checkout"]["mode"];
+          })}
+        />
+        <SelectField
+          label="Checkout Protocol"
+          value={checkout.protocol}
+          options={["ssh", "https"]}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.workspace.checkout.protocol = value as AppSettings["workspace"]["checkout"]["protocol"];
+          })}
+        />
+        <NumberField
+          label="Clone Depth"
+          value={checkout.depth ?? 0}
+          min={0}
+          onChange={(value) => updateSettings(onChange, settings, (draft) => {
+            draft.workspace.checkout.depth = value > 0 ? value : null;
+          })}
+        />
       </div>
+      <CheckoutOverrideEditor settings={settings} onChange={onChange} />
       <TextAreaField
         label="After Create Hook"
         value={settings.workspace.hooks.after_create || ""}
@@ -1044,6 +1071,111 @@ function WorkspaceSettings({
         })}
       />
     </>
+  );
+}
+
+// 函数说明：渲染 workspace.checkout.repositories 覆盖配置编辑器。
+function CheckoutOverrideEditor({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}): JSX.Element {
+  const overrides = settings.workspace.checkout.repositories;
+  const entries = Object.entries(overrides);
+  const usedRepositories = new Set(Object.keys(overrides));
+  const addableRepository = settings.tracker.repositories.find(
+    (repository) => !usedRepositories.has(repository),
+  );
+
+  return (
+    <div className="checkoutOverrides">
+      <div className="checkoutOverridesHeader">
+        <span>Repository Overrides</span>
+        <button
+          className="secondaryButton"
+          type="button"
+          disabled={!addableRepository}
+          onClick={() => {
+            if (!addableRepository) {
+              return;
+            }
+            updateSettings(onChange, settings, (draft) => {
+              draft.workspace.checkout.repositories[addableRepository] = {
+                clone_url: null,
+                branch: null,
+                path: ".",
+              };
+            });
+          }}
+        >
+          <Plus size={15} aria-hidden="true" />
+          Add Override
+        </button>
+      </div>
+      {entries.length ? (
+        <div className="checkoutOverrideRows">
+          {entries.map(([repository, override]) => {
+            const repositoryOptions = Array.from(
+              new Set([
+                repository,
+                ...settings.tracker.repositories.filter(
+                  (candidate) => candidate === repository || !usedRepositories.has(candidate),
+                ),
+              ]),
+            );
+            return (
+              <div className="checkoutOverrideRow" key={repository}>
+                <SelectField
+                  label="Repository"
+                  value={repository}
+                  options={repositoryOptions}
+                  onChange={(value) => updateSettings(onChange, settings, (draft) => {
+                    const current = draft.workspace.checkout.repositories[repository];
+                    delete draft.workspace.checkout.repositories[repository];
+                    draft.workspace.checkout.repositories[value] = current;
+                  })}
+                />
+                <TextField
+                  label="Clone URL"
+                  value={override.clone_url || ""}
+                  onChange={(value) => updateSettings(onChange, settings, (draft) => {
+                    draft.workspace.checkout.repositories[repository].clone_url = value || null;
+                  })}
+                />
+                <TextField
+                  label="Branch"
+                  value={override.branch || ""}
+                  onChange={(value) => updateSettings(onChange, settings, (draft) => {
+                    draft.workspace.checkout.repositories[repository].branch = value || null;
+                  })}
+                />
+                <TextField
+                  label="Path"
+                  value={override.path || "."}
+                  onChange={(value) => updateSettings(onChange, settings, (draft) => {
+                    draft.workspace.checkout.repositories[repository].path = value || ".";
+                  })}
+                />
+                <button
+                  className="iconButton checkoutDeleteButton"
+                  type="button"
+                  title="Remove override"
+                  onClick={() => updateSettings(onChange, settings, (draft) => {
+                    delete draft.workspace.checkout.repositories[repository];
+                  })}
+                >
+                  <Trash2 size={15} aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <span className="mutedText">No repository overrides configured.</span>
+      )}
+    </div>
   );
 }
 
@@ -1612,7 +1744,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "在 GitHub Project 页把阶段分成 Active、Handoff、Terminal 三类，并在 Tools 里选择哪些阶段会受 issue dependencies 阻塞。",
         "默认状态建议为 Todo、In Progress、Rework、Human Review、Merging、Done、Closed、Cancelled；Merging 是 active land 阶段，Human Review 是人工交接阶段。",
         "只读观测需要 Project 和仓库读取权限；允许 agent 写 GitHub、push 分支或更新 PR 时需要相应写权限。",
-        "在 Workspace 设置 root 和 after_create hook。常见 hook 是 git clone 目标仓库到当前工作区。",
+        "在 Workspace 设置 root、checkout mode/protocol/depth；after_create hook 只保留给 checkout 之后的自定义脚本。",
         "在 Prompt 中保留 Workpad、branch/commit/push/PR、PR feedback sweep、checks green、Human Review 和 Merging land 的规则。",
         "点击 Save & Apply，然后回到 Dashboard 看候选任务、运行中 agent 和事件流。",
       ],
@@ -1639,6 +1771,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "GitHub REST/GraphQL API 默认指向 github.com；GitHub Enterprise 后续可改这里。",
         "GitHub Project 页会通过 PAT discovery 填充 owner、project number、Status 字段、状态和 repositories。",
         "Workspace root 可以使用 ~，每个任务会在 root 下创建独立目录。",
+        "Checkout 默认按当前 Issue/PR 的 repository clone 到任务工作区；repository overrides 可为单个仓库改 clone URL、branch 或 path。",
         "Max concurrent agents 控制并发，建议从 1 到 3 开始。",
         "Completion 默认使用 agent_managed；agent 在 PR 前置门禁达标后把 Project Status 移到 Human Review，App 不在成功 turn 后自动改状态。",
         "approval_policy: never 或 high_trust preset 是高信任模式，会自动批准 app-server 的命令、文件变更和可识别工具 approval prompt；只应配合隔离工作区、受限 token 和可信 prompt 使用。",
@@ -1686,7 +1819,7 @@ function helpSections(): Array<{ title: string; paragraphs: string[]; items: str
         "Project not found：检查 owner type、owner、project number 和 PAT 的 Project 权限。",
         "No candidate work：确认 Issue/PR 已加入 Project，Status 属于 active states，仓库在 repositories 列表内。",
         "Codex CLI missing：安装并确认 codex app-server 可在终端运行。",
-        "Workspace hook 失败：先在目标 workspace root 下手动运行同等 git clone 命令验证 SSH key 和权限。",
+        "Workspace checkout/hook 失败：先在目标 workspace root 下手动运行同等 git clone 或 hook 命令验证 SSH key、分支和权限。",
       ],
     },
   ];

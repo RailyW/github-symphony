@@ -73,6 +73,19 @@ export type AppSettings = {
   workspace: {
     root: string;
     cleanup_terminal_workspaces: boolean;
+    checkout: {
+      mode: "clone" | "hook" | "none";
+      protocol: "ssh" | "https";
+      depth: number | null;
+      repositories: Record<
+        string,
+        {
+          clone_url: string | null;
+          branch: string | null;
+          path: string;
+        }
+      >;
+    };
     hooks: {
       after_create: string | null;
     };

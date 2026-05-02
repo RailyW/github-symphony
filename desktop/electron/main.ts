@@ -239,8 +239,14 @@ function defaultSettings(): Record<string, unknown> {
     workspace: {
       root: "~/code/github-symphony-workspaces",
       cleanup_terminal_workspaces: false,
+      checkout: {
+        mode: "clone",
+        protocol: "ssh",
+        depth: 1,
+        repositories: {},
+      },
       hooks: {
-        after_create: "git clone git@github.com:your-org/your-repo.git .",
+        after_create: null,
       },
     },
     agent: {
@@ -373,7 +379,13 @@ async function loadSettingsDocument(): Promise<Record<string, unknown>> {
 
 // 函数说明：把旧版本 settings 与当前默认结构深度合并，避免新增字段导致旧安装 UI 崩溃。
 function mergeSettingsWithDefaults(stored: Record<string, unknown>): Record<string, unknown> {
-  return deepMerge(defaultSettings(), stored);
+  const merged = deepMerge(defaultSettings(), stored);
+  if (isLegacyHookOnlyWorkspace(stored)) {
+    const workspace = merged.workspace as Record<string, unknown>;
+    const checkout = workspace.checkout as Record<string, unknown>;
+    checkout.mode = "hook";
+  }
+  return merged;
 }
 
 // 函数说明：递归合并对象；数组和标量以用户已保存值为准。
@@ -399,6 +411,16 @@ function deepMerge(
 // 函数说明：判断值是否为普通对象，供 settings 深度合并使用。
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// 函数说明：识别只有 after_create hook 的旧 settings，避免补默认 checkout 后重复 clone。
+function isLegacyHookOnlyWorkspace(value: Record<string, unknown>): boolean {
+  const workspace = value.workspace;
+  if (!isPlainObject(workspace) || isPlainObject(workspace.checkout)) {
+    return false;
+  }
+  const hooks = workspace.hooks;
+  return isPlainObject(hooks) && typeof hooks.after_create === "string" && hooks.after_create.trim().length > 0;
 }
 
 // 函数说明：读取 secret 状态，不向 renderer 返回真实 token。

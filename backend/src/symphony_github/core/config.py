@@ -22,6 +22,9 @@ DEFAULT_HANDOFF_STATES = ["Human Review"]
 DEFAULT_TERMINAL_STATES = ["Done", "Closed", "Cancelled"]
 DEFAULT_FAILURE_STATE = "Rework"
 HIGH_TRUST_APPROVAL_PRESETS = {"high_trust", "high-trust", "pr_full_auto", "pr-before-full-auto"}
+DEFAULT_WORKSPACE_CHECKOUT_MODE = "clone"
+DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL = "ssh"
+DEFAULT_WORKSPACE_CHECKOUT_DEPTH = 1
 
 
 @dataclass
@@ -61,10 +64,30 @@ class WorkspaceHooksConfig:
 
 
 @dataclass
+class WorkspaceCheckoutRepositoryConfig:
+    """单个仓库的 checkout 覆盖配置。"""
+
+    clone_url: Optional[str] = None
+    branch: Optional[str] = None
+    path: str = "."
+
+
+@dataclass
+class WorkspaceCheckoutConfig:
+    """内置工作区 checkout 配置。"""
+
+    mode: str = DEFAULT_WORKSPACE_CHECKOUT_MODE
+    protocol: str = DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL
+    depth: Optional[int] = DEFAULT_WORKSPACE_CHECKOUT_DEPTH
+    repositories: Dict[str, WorkspaceCheckoutRepositoryConfig] = field(default_factory=dict)
+
+
+@dataclass
 class WorkspaceConfig:
     """本地工作区配置。"""
 
     root: str
+    checkout: WorkspaceCheckoutConfig = field(default_factory=WorkspaceCheckoutConfig)
     hooks: WorkspaceHooksConfig = field(default_factory=WorkspaceHooksConfig)
     cleanup_terminal_workspaces: bool = False
 
@@ -192,6 +215,7 @@ def build_config(raw: Dict[str, Any], workflow_path: Optional[str] = None) -> Sy
 
     blocker_policy = _build_blocker_policy(raw.get("blocker_policy"), tracker)
     workspace = _build_workspace(workspace_raw, workflow_path)
+    _validate_workspace_checkout_repositories(workspace.checkout, tracker)
     agent = _build_agent(raw.get("agent"))
     codex = _build_codex(raw.get("codex"))
     tools = _build_tools(raw.get("tools"))
@@ -240,11 +264,111 @@ def _build_workspace(raw: Dict[str, Any], workflow_path: Optional[str]) -> Works
 
     hooks_raw = raw.get("hooks") if isinstance(raw.get("hooks"), dict) else {}
     hooks = WorkspaceHooksConfig(after_create=_optional_string(hooks_raw.get("after_create")))
+    checkout = _build_workspace_checkout(raw.get("checkout"), hooks.after_create is not None)
     return WorkspaceConfig(
         root=str(root_path),
+        checkout=checkout,
         hooks=hooks,
         cleanup_terminal_workspaces=bool(raw.get("cleanup_terminal_workspaces", False)),
     )
+
+
+# 函数说明：构建内置 checkout 配置；旧 hook-only WORKFLOW 缺少 checkout 时保持 hook 语义。
+def _build_workspace_checkout(raw: Any, has_after_create_hook: bool) -> WorkspaceCheckoutConfig:
+    mapping = raw if isinstance(raw, dict) else {}
+    default_mode = (
+        "hook"
+        if raw is None and has_after_create_hook
+        else DEFAULT_WORKSPACE_CHECKOUT_MODE
+    )
+    depth = (
+        _optional_positive_int(mapping.get("depth"), "workspace.checkout.depth")
+        if "depth" in mapping
+        else DEFAULT_WORKSPACE_CHECKOUT_DEPTH
+    )
+    checkout = WorkspaceCheckoutConfig(
+        mode=str(mapping.get("mode") or default_mode),
+        protocol=str(mapping.get("protocol") or DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL),
+        depth=depth,
+        repositories=_workspace_checkout_repositories(
+            mapping.get("repositories", mapping.get("overrides"))
+        ),
+    )
+    _validate_workspace_checkout(checkout)
+    return checkout
+
+
+# 函数说明：解析 checkout 仓库覆盖配置，兼容 YAML 映射和 App settings 列表两种形状。
+def _workspace_checkout_repositories(
+    value: Any,
+) -> Dict[str, WorkspaceCheckoutRepositoryConfig]:
+    if value is None:
+        return {}
+
+    items: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        items = [(str(repository), override) for repository, override in value.items()]
+    elif isinstance(value, list):
+        for index, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"workspace.checkout.repositories[{index}] 必须是对象"
+                )
+            repository = entry.get("repository") or entry.get("name")
+            if not repository:
+                raise ValueError(
+                    f"workspace.checkout.repositories[{index}].repository 是必填项"
+                )
+            items.append((str(repository), entry))
+    else:
+        raise ValueError("workspace.checkout.repositories 必须是对象或对象列表")
+
+    repositories: Dict[str, WorkspaceCheckoutRepositoryConfig] = {}
+    for repository, override in items:
+        normalized_repository = repository.strip()
+        _validate_repository_name(normalized_repository, "workspace.checkout.repositories")
+        if normalized_repository in repositories:
+            raise ValueError(
+                f"workspace.checkout.repositories 不能重复配置：{normalized_repository}"
+            )
+
+        # 逻辑说明：空对象表示仅覆盖 path 默认值，其他字段仍按全局 checkout 生成。
+        override_raw = override if isinstance(override, dict) else {}
+        repositories[normalized_repository] = WorkspaceCheckoutRepositoryConfig(
+            clone_url=_optional_string(override_raw.get("clone_url")),
+            branch=_optional_string(override_raw.get("branch")),
+            path=_optional_string(override_raw.get("path")) or ".",
+        )
+    return repositories
+
+
+# 函数说明：校验 checkout 基础枚举和覆盖配置中的路径占位。
+def _validate_workspace_checkout(checkout: WorkspaceCheckoutConfig) -> None:
+    if checkout.mode not in {"clone", "hook", "none"}:
+        raise ValueError("workspace.checkout.mode 必须是 clone、hook 或 none")
+
+    if checkout.protocol not in {"ssh", "https"}:
+        raise ValueError("workspace.checkout.protocol 必须是 ssh 或 https")
+
+    for repository, override in checkout.repositories.items():
+        if not override.path.strip():
+            raise ValueError(f"workspace.checkout.repositories.{repository}.path 不能为空")
+
+
+# 函数说明：校验 checkout 覆盖只面向 tracker allowlist 中的仓库，避免配置静默失效。
+def _validate_workspace_checkout_repositories(
+    checkout: WorkspaceCheckoutConfig,
+    tracker: TrackerConfig,
+) -> None:
+    allowed = set(tracker.repositories)
+    unknown = sorted(
+        repository for repository in checkout.repositories if repository not in allowed
+    )
+    if unknown:
+        raise ValueError(
+            "workspace.checkout.repositories 只能配置 tracker.repositories 中的仓库："
+            f"{', '.join(unknown)}"
+        )
 
 
 # 函数说明：构建 agent 调度配置，并约束并发和轮询参数的下限。
@@ -330,9 +454,9 @@ def _validate_tracker(tracker: TrackerConfig) -> None:
     if not tracker.repositories:
         raise ValueError("tracker.repositories 至少需要一个仓库")
 
+    _validate_unique_strings(tracker.repositories, "tracker.repositories")
     for repository in tracker.repositories:
-        if "/" not in repository:
-            raise ValueError("tracker.repositories 必须使用 owner/repo 格式")
+        _validate_repository_name(repository, "tracker.repositories")
 
     if not tracker.active_states:
         raise ValueError("tracker.active_states 不能为空")
@@ -452,6 +576,18 @@ def _optional_string(value: Any) -> Optional[str]:
     return text or None
 
 
+# 函数说明：解析可选正整数；空值表示禁用该数值型 checkout 参数。
+def _optional_positive_int(value: Any, name: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} 必须是正整数")
+    return parsed
+
+
 # 函数说明：解析可选字符串列表；字段缺失或为空时返回空列表，用于兼容旧配置。
 def _optional_string_list(value: Any, name: str) -> List[str]:
     if value is None:
@@ -552,6 +688,15 @@ def _validate_unique_strings(values: List[str], name: str) -> None:
         seen.add(value)
     if duplicates:
         raise ValueError(f"{name} 不能包含重复值：{', '.join(duplicates)}")
+
+
+# 函数说明：校验 GitHub 仓库名使用 owner/repo 格式。
+def _validate_repository_name(repository: str, name: str) -> None:
+    parts = repository.split("/")
+    has_invalid_shape = len(parts) != 2 or not parts[0] or not parts[1]
+    has_whitespace = any(character.isspace() for character in repository)
+    if has_invalid_shape or has_whitespace:
+        raise ValueError(f"{name} 必须使用 owner/repo 格式")
 
 
 # 函数说明：校验两个状态角色集合没有交集。

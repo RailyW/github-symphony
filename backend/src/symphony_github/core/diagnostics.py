@@ -34,6 +34,7 @@ SECRET_KEYS = {
     "token",
 }
 SECRET_PATTERNS = [
+    re.compile(r"((?:https?|ssh)://)[^/@\s]+(?=@)", re.IGNORECASE),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
     re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),

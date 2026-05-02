@@ -29,9 +29,16 @@ flowchart LR
 
 1. 刷新运行中任务状态。
 2. 读取 active states 中的 Project items。
-3. 按 priority、created_at、identifier 排序。
-4. 跳过 running/claimed、terminal、配置为 blocked states 且存在未完成依赖、超过并发槽的任务。
-5. 为可派发任务创建 runner。
+3. 丢弃不在 `tracker.repositories` allowlist 内的仓库，避免多仓库 Project 派发到未授权仓库。
+4. 按 priority、created_at、identifier 排序。
+5. 跳过 running/claimed、terminal、配置为 blocked states 且存在未完成依赖、超过并发槽的任务。
+6. 为可派发任务创建 runner。
+
+## Workspace Checkout
+
+每个 `WorkItem` 会映射到 `workspace.root` 下的隔离目录，Codex app-server 的 `cwd` 始终是这个 per-item workspace。首次创建工作区时，`workspace.checkout.mode=clone` 会按当前 item 的 `repository` 生成 clone URL 并把仓库 checkout 到配置的 `path`，默认是 `git@github.com:owner/repo.git` 到 `.`。`protocol`、`depth` 和 `workspace.checkout.repositories` 可覆盖协议、浅克隆深度、单仓库 `clone_url`、`branch` 与 `path`。
+
+`workspace.hooks.after_create` 保留为 checkout 后的扩展 hook，用于安装依赖、准备本地配置或执行高级自定义流程。旧 WORKFLOW 如果只配置了 `after_create` 而没有 `workspace.checkout`，配置层会把 checkout mode 归一化为 `hook`，保持历史 hook-only 行为。
 
 ## Status Policy
 

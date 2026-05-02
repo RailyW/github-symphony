@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -31,12 +32,14 @@ from symphony_github.core.orchestrator import Orchestrator
 from symphony_github.core.prompt import PromptRenderError, render_prompt
 from symphony_github.core.runner import AgentRunner
 from symphony_github.core.settings import (
+    default_app_settings,
     export_workflow_text,
     import_workflow_text,
     normalize_app_settings,
 )
 from symphony_github.core.state_policy import build_workflow_prompt_context
 from symphony_github.core.workflow import load_workflow
+from symphony_github.core.workspace import WorkspaceError, WorkspaceManager, build_checkout_plan
 from symphony_github.integrations.github.client import GitHubClient
 from symphony_github.integrations.github.discovery import GitHubDiscoveryService
 from symphony_github.integrations.github.dynamic_tools import GitHubDynamicTools
@@ -238,6 +241,104 @@ Prompt body
         self.assertEqual(document.config.completion_policy.success_state, "Human Review")
         self.assertFalse(document.config.completion_policy.mark_done_after_successful_turn)
         self.assertEqual(document.config.logging.level, "DEBUG")
+
+    # 函数说明：测试默认 App settings 使用内置动态 checkout，不再写死单仓库 clone hook。
+    def test_default_app_settings_uses_dynamic_checkout(self) -> None:
+        settings = default_app_settings()
+        document = normalize_app_settings(settings)
+
+        self.assertEqual(document.config.workspace.checkout.mode, "clone")
+        self.assertEqual(document.config.workspace.checkout.protocol, "ssh")
+        self.assertEqual(document.config.workspace.checkout.depth, 1)
+        self.assertIsNone(document.config.workspace.hooks.after_create)
+        self.assertEqual(settings["workspace"]["checkout"]["repositories"], {})
+
+    # 函数说明：测试只有 after_create 的旧 WORKFLOW 会保持 hook-only checkout 兼容模式。
+    def test_hook_only_workflow_defaults_checkout_mode_to_hook(self) -> None:
+        result = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo]
+workspace:
+  root: /tmp/github-symphony-test
+  hooks:
+    after_create: git clone git@github.com:acme/demo.git .
+---
+Prompt body
+"""
+        )
+
+        self.assertEqual(result.settings["workspace"]["checkout"]["mode"], "hook")
+        self.assertIn("git clone", result.settings["workspace"]["hooks"]["after_create"])
+
+    # 函数说明：测试 checkout 覆盖配置可导入、归一化并导出。
+    def test_checkout_repository_overrides_round_trip(self) -> None:
+        imported = import_workflow_text(
+            """---
+tracker:
+  kind: github_projects_v2
+  owner_type: org
+  owner: acme
+  project_number: 3
+  repositories: [acme/demo, acme/api]
+workspace:
+  root: /tmp/github-symphony-test
+  checkout:
+    mode: clone
+    protocol: https
+    depth: 5
+    repositories:
+      acme/api:
+        clone_url: https://example.com/acme/api.git
+        branch: develop
+        path: src/api
+---
+Prompt body
+"""
+        )
+        checkout = imported.settings["workspace"]["checkout"]
+
+        self.assertEqual(checkout["protocol"], "https")
+        self.assertEqual(checkout["depth"], 5)
+        self.assertEqual(checkout["repositories"]["acme/api"]["branch"], "develop")
+        exported = export_workflow_text(imported.settings)
+        self.assertIn("checkout:", exported)
+        self.assertIn("acme/api:", exported)
+        self.assertIn("branch: develop", exported)
+
+    # 函数说明：测试仓库 allowlist 必须严格使用单层 owner/repo，避免 REST 与 checkout 漂移。
+    def test_repository_names_must_be_strict_owner_repo(self) -> None:
+        with self.assertRaisesRegex(ValueError, "owner/repo"):
+            build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo/extra"],
+                    },
+                    "workspace": {"root": "/tmp/github-symphony-test"},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "重复"):
+            build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo", "acme/demo"],
+                    },
+                    "workspace": {"root": "/tmp/github-symphony-test"},
+                }
+            )
 
     # 函数说明：测试默认状态机支持 PR 前自治，Merging 可派发而 Human Review 只用于交接。
     def test_default_config_uses_pr_autonomy_state_machine(self) -> None:
@@ -806,6 +907,213 @@ class FakeProjectClient(GitHubClient):
         return []
 
 
+class WorkspaceCheckoutTest(unittest.TestCase):
+    """验证工作区内置 checkout 行为。"""
+
+    # 函数说明：测试默认 checkout plan 会使用当前 work item 的仓库生成 SSH clone 命令。
+    def test_checkout_plan_uses_current_work_item_repository(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        plan = build_checkout_plan(
+            config.workspace.checkout,
+            Path("/tmp/github-symphony-test/acme-demo-1"),
+            _item("I_1", "acme/demo#1", blocked_by_open_count=0),
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(
+            plan.command,
+            ["git", "clone", "--depth", "1", "git@github.com:acme/demo.git", "."],
+        )
+
+    # 函数说明：测试自定义 clone_url、branch、path 会进入 clone 命令并先于 hook 执行。
+    def test_prepare_runs_checkout_before_after_create_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/api"],
+                    },
+                    "workspace": {
+                        "root": tmp,
+                        "checkout": {
+                            "mode": "clone",
+                            "protocol": "https",
+                            "depth": 5,
+                            "repositories": {
+                                "acme/api": {
+                                    "clone_url": "https://example.com/acme/api.git",
+                                    "branch": "develop",
+                                    "path": "src/api",
+                                }
+                            },
+                        },
+                        "hooks": {"after_create": "echo setup"},
+                    },
+                }
+            )
+            calls = []
+
+            # 函数说明：截获 subprocess.run，避免单元测试访问真实 git 或 shell。
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                workspace = WorkspaceManager(config.workspace).prepare(
+                    _item("I_7", "acme/api#7", blocked_by_open_count=0)
+                )
+
+            self.assertEqual(
+                calls[0][0],
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "5",
+                    "--branch",
+                    "develop",
+                    "https://example.com/acme/api.git",
+                    "src/api",
+                ],
+            )
+            self.assertEqual(calls[1][0], "echo setup")
+            self.assertEqual(calls[0][1]["cwd"], workspace)
+            self.assertEqual(calls[1][1]["cwd"], workspace)
+            self.assertEqual(calls[0][1]["env"]["SYMPHONY_REPOSITORY"], "acme/api")
+
+    # 函数说明：测试旧 hook-only 配置不会自动执行内置 checkout。
+    def test_hook_only_workspace_runs_only_after_create_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                    },
+                    "workspace": {
+                        "root": tmp,
+                        "hooks": {"after_create": "git clone git@github.com:acme/demo.git ."},
+                    },
+                }
+            )
+            calls = []
+
+            # 函数说明：截获 hook 执行，验证没有额外 git clone checkout 调用。
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                WorkspaceManager(config.workspace).prepare(
+                    _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+                )
+
+            self.assertEqual(config.workspace.checkout.mode, "hook")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "git clone git@github.com:acme/demo.git .")
+
+    # 函数说明：测试 checkout path 不能逃出单个 work item 工作区。
+    def test_checkout_path_cannot_escape_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                    },
+                    "workspace": {
+                        "root": tmp,
+                        "checkout": {
+                            "mode": "clone",
+                            "repositories": {"acme/demo": {"path": "../outside"}},
+                        },
+                    },
+                }
+            )
+
+            with self.assertRaisesRegex(WorkspaceError, "越界"):
+                WorkspaceManager(config.workspace).prepare(
+                    _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+                )
+
+    # 函数说明：测试 clone 失败会清理新工作区并脱敏错误，确保下一轮重试会重新 checkout。
+    def test_failed_checkout_is_redacted_and_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                    },
+                    "workspace": {
+                        "root": tmp,
+                        "checkout": {
+                            "mode": "clone",
+                            "repositories": {
+                                "acme/demo": {
+                                    "clone_url": "https://user:topsecret@example.com/acme/demo.git"
+                                }
+                            },
+                        },
+                    },
+                }
+            )
+            manager = WorkspaceManager(config.workspace)
+            item = _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+            workspace = Path(tmp) / "acme-demo-1"
+            calls = []
+
+            # 函数说明：第一次 clone 模拟鉴权失败，第二次模拟调度器重试时成功。
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                if len(calls) == 1:
+                    return subprocess.CompletedProcess(
+                        command,
+                        128,
+                        stdout="",
+                        stderr=(
+                            "fatal: could not read Username for "
+                            "'https://user:topsecret@example.com/acme/demo.git'"
+                        ),
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                with self.assertRaises(WorkspaceError) as captured:
+                    manager.prepare(item)
+
+                self.assertNotIn("topsecret", str(captured.exception))
+                self.assertNotIn("user:topsecret", str(captured.exception))
+                self.assertFalse(workspace.exists())
+                self.assertEqual(manager.prepare(item), str(workspace.resolve()))
+
+            self.assertEqual(len(calls), 2)
+
+
 class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
     """验证 GitHub Projects v2 tracker 归一化。"""
 
@@ -840,6 +1148,43 @@ class GitHubTrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0].blocked_by_open_count, 1)
         self.assertEqual(items[0].priority, 2.0)
         self.assertEqual(client.rest_paths, ["/repos/acme/demo/issues/2/dependencies/blocked_by"])
+
+    # 函数说明：测试 tracker.repositories 会作为 Project item 仓库 allowlist。
+    async def test_fetch_candidate_issues_skips_items_outside_repository_allowlist(self) -> None:
+        config = build_config(
+            {
+                "tracker": {
+                    "kind": "github_projects_v2",
+                    "owner_type": "org",
+                    "owner": "acme",
+                    "project_number": 1,
+                    "repositories": ["acme/demo"],
+                    "active_states": ["Todo"],
+                    "terminal_states": ["Done"],
+                    "priority_field": "Priority",
+                },
+                "workspace": {"root": "/tmp/github-symphony-test"},
+            }
+        )
+        events = EventStore()
+        tracker = GitHubProjectsV2Tracker(
+            config.tracker,
+            config.blocker_policy,
+            FakeProjectClient(),
+            events,
+        )
+
+        items = await tracker.fetch_candidate_issues()
+        skipped_events = [
+            event
+            for event in events.recent()
+            if event.message
+            == "GitHub Project item 仓库不在 tracker.repositories allowlist，已跳过"
+        ]
+
+        self.assertEqual([item.repository for item in items], ["acme/demo"])
+        self.assertEqual(skipped_events[0].payload["repository"], "other/repo")
+        self.assertEqual(skipped_events[0].payload["allowed_repositories"], ["acme/demo"])
 
     # 函数说明：测试运行中任务状态回查不会额外读取 dependencies。
     async def test_fetch_issue_states_by_ids_skips_dependency_lookup(self) -> None:
@@ -1081,7 +1426,7 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                         "active_states": ["Todo"],
                         "terminal_states": ["Done"],
                     },
-                    "workspace": {"root": tmp},
+                    "workspace": {"root": tmp, "checkout": {"mode": "none"}},
                     "completion_policy": {
                         "kind": "update_project_status",
                         "success_state": "Done",
@@ -1138,7 +1483,7 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                         "handoff_states": ["Human Review"],
                         "terminal_states": ["Shipped"],
                     },
-                    "workspace": {"root": tmp},
+                    "workspace": {"root": tmp, "checkout": {"mode": "none"}},
                     "completion_policy": {
                         "kind": "update_project_status",
                         "success_state": "Human Review",
@@ -1186,7 +1531,7 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                         "active_states": ["Todo"],
                         "terminal_states": ["Done"],
                     },
-                    "workspace": {"root": tmp},
+                    "workspace": {"root": tmp, "checkout": {"mode": "none"}},
                     "agent": {"max_turns": 1},
                     "completion_policy": {
                         "kind": "agent_managed",
@@ -1232,7 +1577,7 @@ class AgentRunnerCompletionTest(unittest.IsolatedAsyncioTestCase):
                         "active_states": ["Todo"],
                         "terminal_states": ["Done"],
                     },
-                    "workspace": {"root": tmp},
+                    "workspace": {"root": tmp, "checkout": {"mode": "none"}},
                     "completion_policy": {
                         "kind": "update_project_status",
                         "success_state": "Done",
@@ -1594,6 +1939,7 @@ class DiagnosticsLoggingTest(unittest.TestCase):
 
 # 函数说明：创建测试 WorkItem。
 def _item(issue_id: str, identifier: str, blocked_by_open_count: int) -> WorkItem:
+    repository, number_text = identifier.rsplit("#", 1)
     return WorkItem(
         id=issue_id,
         project_item_id=f"PVTI_{issue_id}",
@@ -1603,8 +1949,8 @@ def _item(issue_id: str, identifier: str, blocked_by_open_count: int) -> WorkIte
         body=None,
         state="Todo",
         url=f"https://github.com/{identifier.replace('#', '/issues/')}",
-        repository="acme/demo",
-        number=int(identifier.rsplit("#", 1)[1]),
+        repository=repository,
+        number=int(number_text),
         blocked_by_open_count=blocked_by_open_count,
     )
 
@@ -1682,6 +2028,26 @@ def _project_items_payload() -> Dict:
                                     "createdAt": "2026-01-03T00:00:00Z",
                                     "updatedAt": "2026-01-04T00:00:00Z",
                                     "repository": {"nameWithOwner": "acme/demo"},
+                                    "labels": {"nodes": []},
+                                    "assignees": {"nodes": []},
+                                },
+                            },
+                            {
+                                "id": "PVTI_3",
+                                "isArchived": False,
+                                "statusValue": {"name": "Todo", "optionId": "todo-id"},
+                                "priorityValue": {"number": 3},
+                                "content": {
+                                    "__typename": "Issue",
+                                    "id": "I_3",
+                                    "number": 3,
+                                    "title": "Outside repo issue",
+                                    "body": "Not in allowlist",
+                                    "url": "https://github.com/other/repo/issues/3",
+                                    "state": "OPEN",
+                                    "createdAt": "2026-01-05T00:00:00Z",
+                                    "updatedAt": "2026-01-06T00:00:00Z",
+                                    "repository": {"nameWithOwner": "other/repo"},
                                     "labels": {"nodes": []},
                                     "assignees": {"nodes": []},
                                 },

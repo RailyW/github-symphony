@@ -47,6 +47,7 @@ class GitHubProjectsV2Tracker:
         self.blocker_policy = blocker_policy
         self.client = client
         self.events = events
+        self._allowed_repositories = set(config.repositories)
         self._field_cache: Optional[ProjectFieldCache] = None
 
     # 函数说明：读取 active states 内的候选任务。
@@ -182,6 +183,19 @@ class GitHubProjectsV2Tracker:
         repository = (content.get("repository") or {}).get("nameWithOwner")
         number = content.get("number")
         if not repository or number is None:
+            return None
+
+        if str(repository) not in self._allowed_repositories:
+            self._debug(
+                "GitHub Project item 仓库不在 tracker.repositories allowlist，已跳过",
+                {
+                    "project_item_id": str(node.get("id") or ""),
+                    "repository": str(repository),
+                    "number": int(number),
+                    "kind": "pull_request" if typename == "PullRequest" else "issue",
+                    "allowed_repositories": sorted(self._allowed_repositories),
+                },
+            )
             return None
 
         status_value = node.get("statusValue") or {}

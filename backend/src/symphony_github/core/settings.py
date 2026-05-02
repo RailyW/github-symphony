@@ -11,6 +11,9 @@ from .config import (
     DEFAULT_HANDOFF_STATES,
     DEFAULT_STATUS_OPTIONS,
     DEFAULT_TERMINAL_STATES,
+    DEFAULT_WORKSPACE_CHECKOUT_DEPTH,
+    DEFAULT_WORKSPACE_CHECKOUT_MODE,
+    DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL,
     SymphonyConfig,
     build_config,
 )
@@ -156,6 +159,7 @@ def settings_to_raw_config(
             "cleanup_terminal_workspaces": bool(
                 workspace_raw.get("cleanup_terminal_workspaces", False)
             ),
+            "checkout": _checkout_settings_to_raw(workspace_raw, hooks_raw),
             "hooks": {"after_create": _optional_value(hooks_raw.get("after_create"))},
         },
         "agent": {
@@ -222,6 +226,7 @@ def settings_from_config(config: SymphonyConfig, prompt_template: str) -> Dict[s
         "workspace": {
             "root": workspace.root,
             "cleanup_terminal_workspaces": workspace.cleanup_terminal_workspaces,
+            "checkout": dataclass_to_dict(workspace.checkout),
             "hooks": dataclass_to_dict(workspace.hooks),
         },
         "agent": dataclass_to_dict(config.agent),
@@ -288,7 +293,13 @@ def default_app_settings() -> Dict[str, Any]:
         "workspace": {
             "root": "~/code/github-symphony-workspaces",
             "cleanup_terminal_workspaces": False,
-            "hooks": {"after_create": "git clone git@github.com:your-org/your-repo.git ."},
+            "checkout": {
+                "mode": DEFAULT_WORKSPACE_CHECKOUT_MODE,
+                "protocol": DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL,
+                "depth": DEFAULT_WORKSPACE_CHECKOUT_DEPTH,
+                "repositories": {},
+            },
+            "hooks": {"after_create": None},
         },
         "agent": {
             "max_concurrent_agents": 3,
@@ -317,6 +328,70 @@ def default_app_settings() -> Dict[str, Any]:
             "max_file_mb": 10,
         },
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
+    }
+
+
+# 函数说明：把 App settings 中的 workspace.checkout 规整成 WORKFLOW front matter 形状。
+def _checkout_settings_to_raw(
+    workspace_raw: Dict[str, Any],
+    hooks_raw: Dict[str, Any],
+) -> Dict[str, Any]:
+    checkout_raw = _mapping(workspace_raw.get("checkout"))
+    has_explicit_checkout = isinstance(workspace_raw.get("checkout"), dict)
+    has_legacy_hook = bool(_optional_value(hooks_raw.get("after_create")))
+
+    # 逻辑说明：旧 WORKFLOW/App settings 只有 after_create hook 时保持 hook-only 语义；
+    # 没有旧 hook 的新配置默认使用当前 work item repository 做内置 clone。
+    default_mode = (
+        "hook"
+        if not has_explicit_checkout and has_legacy_hook
+        else DEFAULT_WORKSPACE_CHECKOUT_MODE
+    )
+    return {
+        "mode": checkout_raw.get("mode", default_mode),
+        "protocol": checkout_raw.get("protocol", DEFAULT_WORKSPACE_CHECKOUT_PROTOCOL),
+        "depth": (
+            checkout_raw.get("depth")
+            if "depth" in checkout_raw
+            else DEFAULT_WORKSPACE_CHECKOUT_DEPTH
+        ),
+        "repositories": _checkout_repository_settings_to_raw(
+            checkout_raw.get("repositories", checkout_raw.get("overrides"))
+        ),
+    }
+
+
+# 函数说明：归一化 checkout repository overrides，导出时使用 repository 名称到覆盖对象的映射。
+def _checkout_repository_settings_to_raw(value: Any) -> Dict[str, Dict[str, Any]]:
+    if value is None:
+        return {}
+
+    if isinstance(value, list):
+        result: Dict[str, Dict[str, Any]] = {}
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+            repository = _optional_value(entry.get("repository") or entry.get("name"))
+            if not repository:
+                continue
+            result[str(repository)] = _checkout_repository_override_to_raw(entry)
+        return result
+
+    if isinstance(value, dict):
+        return {
+            str(repository): _checkout_repository_override_to_raw(_mapping(override))
+            for repository, override in value.items()
+        }
+
+    return {}
+
+
+# 函数说明：归一化单个 checkout repository override，空字符串转为 None 或默认 path。
+def _checkout_repository_override_to_raw(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "clone_url": _optional_value(value.get("clone_url")),
+        "branch": _optional_value(value.get("branch")),
+        "path": _optional_value(value.get("path")) or ".",
     }
 
 

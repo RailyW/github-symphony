@@ -41,6 +41,7 @@ npm run package
 - `Settings` 提供 GitHub Project、Workspace、Agent、Completion、Codex、Tools、Logging、Prompt 分区配置。
 - `Settings / GitHub Project` 会从 GitHub 读取 owner、Projects v2、Status 字段、状态选项和 Project 中出现过的仓库，减少手工填写。
 - `Settings / GitHub Project` 支持把任意自定义 Status 选项分配为 Active、Handoff、Terminal 三类阶段。
+- `Settings / Workspace` 支持内置 checkout 的 mode、protocol、depth 和单仓库覆盖配置；`after_create` 只作为 checkout 后的扩展 hook 保存。
 - `Settings / Completion` 默认使用 `agent_managed` 的 `PR 前全自动` preset，由 prompt 和 GitHub 工具驱动 Workpad、分支、commit、push、PR、feedback sweep、`Human Review` 交接和 `Merging` land；也可切换为 App 自动更新 Project Status。
 - `Settings` 支持导入/导出 `WORKFLOW.md`，导出时只写 `$GITHUB_TOKEN` 占位符。
 - `Logs` 展示持久 JSONL 日志、日志目录、过滤器和诊断包导出入口。

@@ -22,9 +22,18 @@ blocker_policy:
 workspace:
   root: ~/code/github-symphony-workspaces
   cleanup_terminal_workspaces: false
+  checkout:
+    mode: clone
+    protocol: ssh
+    depth: 1
+    repositories:
+      # Optional per-repository override:
+      # your-org/your-repo:
+      #   clone_url: https://github.com/your-org/your-repo.git
+      #   branch: main
+      #   path: .
   hooks:
-    after_create: |
-      git clone git@github.com:your-org/your-repo.git .
+    after_create: null
 
 agent:
   max_concurrent_agents: 3

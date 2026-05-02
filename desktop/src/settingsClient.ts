@@ -96,8 +96,14 @@ export function defaultSettings(): AppSettings {
     workspace: {
       root: "~/code/github-symphony-workspaces",
       cleanup_terminal_workspaces: false,
+      checkout: {
+        mode: "clone",
+        protocol: "ssh",
+        depth: 1,
+        repositories: {},
+      },
       hooks: {
-        after_create: "git clone git@github.com:your-org/your-repo.git .",
+        after_create: null,
       },
     },
     agent: {
@@ -161,7 +167,11 @@ export async function loadSettings(): Promise<SettingsLoadResult> {
 
 // 函数说明：把旧版 localStorage settings 与当前默认结构合并，补齐新增字段。
 function mergeSettingsWithDefaults(stored: unknown): AppSettings {
-  return deepMerge(defaultSettings(), stored) as AppSettings;
+  const merged = deepMerge(defaultSettings(), stored) as AppSettings;
+  if (isLegacyHookOnlyWorkspace(stored)) {
+    merged.workspace.checkout.mode = "hook";
+  }
+  return merged;
 }
 
 // 函数说明：递归合并普通对象；数组和标量保留用户保存值。
@@ -179,6 +189,19 @@ function deepMerge(defaults: unknown, stored: unknown): unknown {
 // 函数说明：判断值是否为普通对象，避免把数组当成对象递归合并。
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// 函数说明：识别缺少 checkout 但已有 after_create 的旧设置，避免自动 clone 与旧 hook 双重执行。
+function isLegacyHookOnlyWorkspace(value: unknown): boolean {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const workspace = value.workspace;
+  if (!isPlainObject(workspace) || isPlainObject(workspace.checkout)) {
+    return false;
+  }
+  const hooks = workspace.hooks;
+  return isPlainObject(hooks) && typeof hooks.after_create === "string" && hooks.after_create.trim().length > 0;
 }
 
 // 函数说明：保存 App settings；Electron 模式下由 main process 处理 safeStorage。

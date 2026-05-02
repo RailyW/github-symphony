@@ -525,6 +525,42 @@ select {
   padding-top: 14px;
 }
 
+.checkoutOverrides {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #eef2f6;
+  padding-top: 14px;
+}
+
+.checkoutOverridesHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.checkoutOverridesHeader > span {
+  color: #344054;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.checkoutOverrideRows {
+  display: grid;
+  gap: 10px;
+}
+
+.checkoutOverrideRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.95fr) minmax(160px, 1.3fr) minmax(110px, 0.8fr) minmax(90px, 0.7fr) 34px;
+  gap: 10px;
+  align-items: end;
+}
+
+.checkoutDeleteButton {
+  margin-bottom: 1px;
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -918,6 +954,7 @@ select {
   .discoveryGrid,
   .statePickerGrid,
   .formGrid,
+  .checkoutOverrideRow,
   .logConfigGrid,
   .logFilters {
     grid-template-columns: 1fr;
