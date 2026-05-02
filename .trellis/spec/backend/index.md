@@ -24,6 +24,7 @@
 | [logging.md](./logging.md)                         | Logging and native module packaging               | Debugging, packaging               |
 | [pagination.md](./pagination.md)                   | Cursor vs offset pagination guidelines            | Implementing list APIs             |
 | [quality.md](./quality.md)                         | Import paths, Vite config, code quality           | Before committing                  |
+| [workspace-checkout.md](./workspace-checkout.md)   | Workspace checkout contract for GitHub Projects   | Modifying checkout or dispatch     |
 | [macos-permissions.md](./macos-permissions.md)     | macOS system permissions (mic, accessibility)     | Features requiring permissions     |
 | [text-input.md](./text-input.md)                   | Text insertion without clipboard pollution        | Voice-to-text, paste features      |
 
@@ -79,6 +80,7 @@
 | Logging                  | [logging.md](./logging.md)         |
 | Scoped logger            | [logging.md](./logging.md)         |
 | Packaging native modules | [logging.md](./logging.md)         |
+| Workspace checkout       | [workspace-checkout.md](./workspace-checkout.md) |
 
 ### Import Paths & Quality
 

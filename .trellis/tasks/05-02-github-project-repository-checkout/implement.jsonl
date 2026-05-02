@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Mandatory cross-language quality rules for this change."}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Renderer and Electron TypeScript type rules for settings model updates."}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Backend quality and test expectations relevant to config/workspace code."}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Backend validation/type-safety guidance for new checkout config parsing."}
+{"file": ".trellis/spec/backend/workspace-checkout.md", "reason": "Executable contract for GitHub Project repository checkout behavior."}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "React state/update pitfalls for Settings UI changes."}
+{"file": ".trellis/spec/frontend/components.md", "reason": "Frontend component semantics for new Settings controls."}
+{"file": ".trellis/tasks/05-02-github-project-repository-checkout/research/upstream-workspace-checkout.md", "reason": "Upstream and local architecture evidence for checkout implementation."}

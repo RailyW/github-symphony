@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Quality gate for all changed code."}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Type-safety gate for settings model changes."}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Backend tests and quality expectations."}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Validate config parsing and checkout type handling."}
+{"file": ".trellis/spec/backend/workspace-checkout.md", "reason": "Verify repository allowlist and workspace checkout behavior."}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "Catch Settings UI state/update regressions."}
+{"file": ".trellis/spec/frontend/components.md", "reason": "Review Settings control semantics and layout."}
+{"file": ".trellis/tasks/05-02-github-project-repository-checkout/research/upstream-workspace-checkout.md", "reason": "Verify implementation matches the chosen upstream-compatible design."}
