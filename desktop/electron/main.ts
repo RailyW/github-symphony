@@ -13,6 +13,10 @@ const externalApiBaseUrl = process.env.SYMPHONY_API_BASE_URL;
 const SETTINGS_FILE_NAME = "settings.json";
 const SECRETS_FILE_NAME = "secrets.json";
 const ELECTRON_LOG_FILE_NAME = "electron-main.jsonl";
+const LEGACY_PLACEHOLDER_REPOSITORY = "your-org/your-repo";
+const CODEX_CONFIG_FILE_NAME = "config.toml";
+const CODEX_ENV_SHELL_TIMEOUT_MS = 1500;
+const MAX_SHELL_ENV_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_STATUS_OPTIONS = [
   "Todo",
   "In Progress",
@@ -154,9 +158,17 @@ function redactSecretData(value: unknown): unknown {
 function isSecretKey(key: string): boolean {
   const normalized = key.toLowerCase();
   return (
-    ["token", "secret", "authorization", "password", "pat", "api_token", "github_token"].includes(
-      normalized,
-    )
+    [
+      "token",
+      "secret",
+      "authorization",
+      "password",
+      "pat",
+      "api_token",
+      "api_key",
+      "github_token",
+    ].includes(normalized)
+    || normalized.endsWith("_key")
     || normalized.endsWith("_token")
     || normalized.endsWith("_secret")
     || normalized.endsWith("_password")
@@ -167,6 +179,7 @@ function isSecretKey(key: string): boolean {
 // 函数说明：脱敏文本中的 GitHub PAT 和 Authorization header。
 function redactSecretText(text: string): string {
   return text
+    .replace(/(\b(?:[A-Za-z_][A-Za-z0-9_]*_key|api_key)\b["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, "$1***")
     .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "***")
     .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "***")
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***")
@@ -346,6 +359,236 @@ function dedupeExistingPathEntries(entries: string[]): string[] {
   return result;
 }
 
+// 函数说明：在 GUI 启动场景中按 Codex 配置声明补齐多个 provider env_key。
+async function hydrateCodexEnvFromConfig(): Promise<void> {
+  const envKeys = await readCodexEnvKeysFromConfig();
+  if (!envKeys.length) {
+    return;
+  }
+
+  const missingEnvKeys: string[] = [];
+  for (const envKey of envKeys) {
+    if (process.env[envKey] !== undefined) {
+      writeElectronLog(
+        "INFO",
+        "electron.codex_env_key_skip",
+        "Codex env_key 已存在于当前进程环境，保持原值",
+        { status: "native", reason: "already_present", variable_name: envKey },
+      );
+      continue;
+    }
+    missingEnvKeys.push(envKey);
+  }
+
+  if (!missingEnvKeys.length) {
+    return;
+  }
+
+  const shellValues = await readInteractiveShellEnvValues(missingEnvKeys);
+  if (!shellValues) {
+    return;
+  }
+
+  for (const envKey of missingEnvKeys) {
+    const shellValue = shellValues.get(envKey);
+    if (!shellValue) {
+      writeElectronLog(
+        "INFO",
+        "electron.codex_env_key_skip",
+        "登录 shell 未提供 Codex env_key 对应变量，保持 Codex 原生环境行为",
+        { status: "native", reason: "missing_in_shell", variable_name: envKey },
+      );
+      continue;
+    }
+
+    // 逻辑说明：只导入 config.toml 声明且当前进程缺失的变量；
+    // 不合并 shell 的完整环境，避免 GUI App 意外扩大后端和 agent 的环境边界。
+    process.env[envKey] = shellValue;
+    writeElectronLog(
+      "INFO",
+      "electron.codex_env_key_imported",
+      "已从登录 shell 导入 Codex env_key 声明的变量",
+      { status: "imported", variable_name: envKey },
+    );
+  }
+}
+
+// 函数说明：读取 ~/.codex/config.toml 中保守格式的 env_key 配置；缺失或不可读时静默跳过。
+async function readCodexEnvKeysFromConfig(): Promise<string[]> {
+  const configPath = path.join(app.getPath("home"), ".codex", CODEX_CONFIG_FILE_NAME);
+  let configText = "";
+
+  try {
+    configText = await fsp.readFile(configPath, "utf-8");
+  } catch (caught) {
+    const code = (caught as NodeJS.ErrnoException).code;
+    writeElectronLog(
+      "INFO",
+      "electron.codex_env_key_skip",
+      "未读取到 Codex config.toml，保持 Codex 原生环境行为",
+      { status: "native", reason: code === "ENOENT" ? "config_missing" : "config_unreadable" },
+    );
+    return [];
+  }
+
+  const envKeys = parseCodexEnvKeys(configText);
+  if (!envKeys.length) {
+    writeElectronLog(
+      "INFO",
+      "electron.codex_env_key_skip",
+      "Codex config.toml 未声明 env_key，保持 Codex 原生环境行为",
+      { status: "native", reason: "env_key_missing" },
+    );
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const validEnvKeys: string[] = [];
+  for (const envKey of envKeys) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
+      writeElectronLog(
+        "WARNING",
+        "electron.codex_env_key_skip",
+        "Codex config.toml env_key 不是合法环境变量名，已跳过",
+        { status: "native", reason: "invalid_env_key", variable_name: envKey },
+      );
+      continue;
+    }
+    if (seen.has(envKey)) {
+      continue;
+    }
+    seen.add(envKey);
+    validEnvKeys.push(envKey);
+  }
+
+  return validEnvKeys;
+}
+
+// 函数说明：只识别单行 env_key = "NAME" 或 env_key = 'NAME'，不尝试完整解析 TOML。
+function parseCodexEnvKeys(configText: string): string[] {
+  const envKeys: string[] = [];
+  for (const line of configText.split(/\r?\n/)) {
+    const match = line.match(/^\s*env_key\s*=\s*(["'])([^"'\r\n]+)\1\s*(?:#.*)?$/);
+    const envKey = match?.[2];
+    if (envKey) {
+      envKeys.push(envKey.trim());
+    }
+  }
+  return envKeys;
+}
+
+// 函数说明：通过短超时登录交互 shell 读取 env -0 输出，并只返回指定变量集合的值。
+function readInteractiveShellEnvValues(envKeys: string[]): Promise<Map<string, string> | null> {
+  const shellPath = process.env.SHELL || "/bin/zsh";
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrText = "";
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+
+    // 逻辑说明：必须检测到 env_key 后才启动登录交互 shell；命令固定为 env -0，
+    // 后续解析阶段只取 envKeys 对应项，不整体合并 shell 环境。
+    const child = spawn(shellPath, ["-ilc", "/usr/bin/env -0"], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const finish = (value: Map<string, string> | null): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve(value);
+    };
+
+    timeout = setTimeout(() => {
+      writeElectronLog(
+        "WARNING",
+        "electron.codex_env_key_shell_timeout",
+        "读取登录 shell 环境超时，保持 Codex 原生环境行为",
+        {
+          status: "native",
+          variable_names: envKeys,
+          timeout_ms: CODEX_ENV_SHELL_TIMEOUT_MS,
+        },
+      );
+      child.kill();
+      finish(null);
+    }, CODEX_ENV_SHELL_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const remainingBytes = MAX_SHELL_ENV_OUTPUT_BYTES - stdoutBytes;
+      if (remainingBytes > 0) {
+        stdoutChunks.push(chunk.subarray(0, remainingBytes));
+      }
+      stdoutBytes += chunk.length;
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderrText.length < 2000) {
+        stderrText += chunk.toString("utf-8");
+      }
+    });
+
+    child.on("error", (caught) => {
+      writeElectronLog(
+        "WARNING",
+        "electron.codex_env_key_shell_failed",
+        "登录 shell 启动失败，保持 Codex 原生环境行为",
+        { status: "native", variable_names: envKeys, error: caught.message },
+      );
+      finish(null);
+    });
+
+    child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      if (code !== 0) {
+        writeElectronLog(
+          "WARNING",
+          "electron.codex_env_key_shell_failed",
+          "登录 shell 环境读取失败，保持 Codex 原生环境行为",
+          {
+            status: "native",
+            variable_names: envKeys,
+            exit_code: code ?? "unknown",
+            stderr: redactSecretText(stderrText).slice(0, 1000),
+          },
+        );
+        finish(null);
+        return;
+      }
+      finish(envValuesFromNullSeparatedOutput(Buffer.concat(stdoutChunks), envKeys));
+    });
+  });
+}
+
+// 函数说明：从 /usr/bin/env -0 输出中提取多个变量值；空值按不可用处理。
+function envValuesFromNullSeparatedOutput(envOutput: Buffer, envKeys: string[]): Map<string, string> {
+  const wanted = new Set(envKeys);
+  const values = new Map<string, string>();
+  for (const entry of envOutput.toString("utf-8").split("\0")) {
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const key = entry.slice(0, separatorIndex);
+    if (!wanted.has(key) || values.has(key)) {
+      continue;
+    }
+    const value = entry.slice(separatorIndex + 1);
+    if (value.length > 0) {
+      values.set(key, value);
+    }
+  }
+  return values;
+}
+
 // 函数说明：从随包 WORKFLOW.example.md 中读取 prompt body；失败时使用内置提示。
 function readBundledPromptTemplate(): string {
   const projectRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
@@ -374,7 +617,11 @@ async function loadSettingsDocument(): Promise<Record<string, unknown>> {
     return initial;
   }
   const stored = await readJsonFile<Record<string, unknown>>(filePath, defaultSettings());
-  return mergeSettingsWithDefaults(stored);
+  const merged = mergeSettingsWithDefaults(stored);
+  if (JSON.stringify(merged) !== JSON.stringify(stored)) {
+    await writeJsonFile(filePath, merged);
+  }
+  return merged;
 }
 
 // 函数说明：把旧版本 settings 与当前默认结构深度合并，避免新增字段导致旧安装 UI 崩溃。
@@ -385,6 +632,7 @@ function mergeSettingsWithDefaults(stored: Record<string, unknown>): Record<stri
     const checkout = workspace.checkout as Record<string, unknown>;
     checkout.mode = "hook";
   }
+  migrateLegacyPlaceholderHook(merged);
   return merged;
 }
 
@@ -421,6 +669,34 @@ function isLegacyHookOnlyWorkspace(value: Record<string, unknown>): boolean {
   }
   const hooks = workspace.hooks;
   return isPlainObject(hooks) && typeof hooks.after_create === "string" && hooks.after_create.trim().length > 0;
+}
+
+// 函数说明：把旧模板中克隆 your-org/your-repo 的占位 hook 迁移为动态 clone checkout。
+function migrateLegacyPlaceholderHook(settings: Record<string, unknown>): void {
+  const workspace = settings.workspace;
+  if (!isPlainObject(workspace)) {
+    return;
+  }
+  const checkout = workspace.checkout;
+  const hooks = workspace.hooks;
+  if (!isPlainObject(checkout) || !isPlainObject(hooks)) {
+    return;
+  }
+  const afterCreate = hooks.after_create;
+  if (
+    checkout.mode !== "hook"
+    || typeof afterCreate !== "string"
+    || !afterCreate.includes(LEGACY_PLACEHOLDER_REPOSITORY)
+  ) {
+    return;
+  }
+
+  // 逻辑说明：占位 hook 会把所有 Project item 都克隆到 your-org/your-repo。
+  // 迁移为 clone checkout 后，实际仓库由当前 GitHub Project item.repository 决定。
+  checkout.mode = "clone";
+  checkout.protocol = "ssh";
+  checkout.depth = 1;
+  hooks.after_create = null;
 }
 
 // 函数说明：读取 secret 状态，不向 renderer 返回真实 token。
@@ -818,13 +1094,14 @@ function createWindow(): void {
 }
 
 // 函数说明：应用启动时先启动后端，再创建窗口。
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   process.env.SYMPHONY_API_BASE_URL = externalApiBaseUrl || apiBaseUrl();
   writeElectronLog("INFO", "electron.app_ready", "Electron App 已启动", {
     packaged: app.isPackaged,
     api_base_url: process.env.SYMPHONY_API_BASE_URL,
     user_data: app.getPath("userData"),
   });
+  await hydrateCodexEnvFromConfig();
   registerSettingsIpc();
   registerLogsIpc();
   startBackend();

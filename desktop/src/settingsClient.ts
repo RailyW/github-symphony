@@ -23,6 +23,7 @@ const DEFAULT_STATUS_OPTIONS = [
 const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress", "Rework", "Merging"];
 const DEFAULT_HANDOFF_STATES = ["Human Review"];
 const DEFAULT_TERMINAL_STATES = ["Done", "Closed", "Cancelled"];
+const LEGACY_PLACEHOLDER_REPOSITORY = "your-org/your-repo";
 const DEFAULT_PROMPT_TEMPLATE = [
   "你正在处理 GitHub 任务：",
   "",
@@ -158,6 +159,9 @@ export async function loadSettings(): Promise<SettingsLoadResult> {
 
   const stored = window.localStorage.getItem("github-symphony-settings");
   const settings = stored ? mergeSettingsWithDefaults(JSON.parse(stored)) : defaultSettings();
+  if (stored && JSON.stringify(settings) !== stored) {
+    window.localStorage.setItem("github-symphony-settings", JSON.stringify(settings));
+  }
   return {
     settings,
     token: { configured: false, encryptionAvailable: false },
@@ -171,6 +175,7 @@ function mergeSettingsWithDefaults(stored: unknown): AppSettings {
   if (isLegacyHookOnlyWorkspace(stored)) {
     merged.workspace.checkout.mode = "hook";
   }
+  migrateLegacyPlaceholderHook(merged);
   return merged;
 }
 
@@ -202,6 +207,27 @@ function isLegacyHookOnlyWorkspace(value: unknown): boolean {
   }
   const hooks = workspace.hooks;
   return isPlainObject(hooks) && typeof hooks.after_create === "string" && hooks.after_create.trim().length > 0;
+}
+
+// 函数说明：把旧模板中克隆 your-org/your-repo 的占位 hook 迁移为动态 clone checkout。
+function migrateLegacyPlaceholderHook(settings: AppSettings): void {
+  const checkout = settings.workspace.checkout;
+  const hooks = settings.workspace.hooks;
+  const afterCreate = hooks.after_create;
+  if (
+    checkout.mode !== "hook"
+    || typeof afterCreate !== "string"
+    || !afterCreate.includes(LEGACY_PLACEHOLDER_REPOSITORY)
+  ) {
+    return;
+  }
+
+  // 逻辑说明：占位 hook 会让所有 Project item 复用 your-org/your-repo；
+  // 动态 checkout 会按当前 GitHub Project item.repository 选择真实仓库。
+  checkout.mode = "clone";
+  checkout.protocol = "ssh";
+  checkout.depth = 1;
+  hooks.after_create = null;
 }
 
 // 函数说明：保存 App settings；Electron 模式下由 main process 处理 safeStorage。
@@ -348,6 +374,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 // 函数说明：脱敏 fallback HTTP 错误文本，避免调试模式把 PAT 显示到 renderer 错误提示中。
 function redactSecretText(text: string): string {
   return text
+    .replace(/(\b(?:[A-Za-z_][A-Za-z0-9_]*_key|api_key)\b["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, "$1***")
     .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "***")
     .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "***")
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***")

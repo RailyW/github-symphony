@@ -25,6 +25,7 @@ DEFAULT_MAX_FILE_MB = 10
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_LOG_LEVEL = "DEBUG"
 SECRET_KEYS = {
+    "api_key",
     "api_token",
     "authorization",
     "github_token",
@@ -35,6 +36,11 @@ SECRET_KEYS = {
 }
 SECRET_PATTERNS = [
     re.compile(r"((?:https?|ssh)://)[^/@\s]+(?=@)", re.IGNORECASE),
+    re.compile(
+        r"(\b(?:[A-Za-z_][A-Za-z0-9_]*_key|api_key)\b[\"']?\s*[:=]\s*[\"']?)"
+        r"[^\"',\s}]+",
+        re.IGNORECASE,
+    ),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
     re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),
@@ -381,6 +387,7 @@ def _normalize_level(level: str) -> str:
 def _is_secret_key(key_text: str) -> bool:
     return (
         key_text in SECRET_KEYS
+        or key_text.endswith("_key")
         or key_text.endswith("_token")
         or key_text.endswith("_secret")
         or key_text.endswith("_password")

@@ -1,0 +1,14 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec index for workspace and diagnostics changes"}
+{"file": ".trellis/spec/backend/workspace-checkout.md", "reason": "Workspace checkout behavior, clone reuse, and Settings checkout contract"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Structured logging and secret-safe diagnostics guidance"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "WorkspaceError and external dependency failure handling"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Backend quality and test expectations"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec index for Electron Settings behavior"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Settings IPC and saved token secrecy boundary"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Renderer constraints while updating Settings UI"}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "React state and effect safety while editing App settings"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Renderer TypeScript and shared type rules"}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Frontend build quality requirements"}
+{"file": ".trellis/spec/shared/index.md", "reason": "Shared spec index for cross-layer rules"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "No unsafe assertions and general code quality rules"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Explicit TypeScript return types and type-only import guidance"}

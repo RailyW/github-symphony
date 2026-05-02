@@ -25,6 +25,8 @@ from symphony_github.core.diagnostics import (
     configure_diagnostics,
     export_diagnostics_bundle,
     query_logs,
+    redact_data,
+    redact_text,
 )
 from symphony_github.core.events import EventStore
 from symphony_github.core.models import RunRecord, WorkItem
@@ -936,6 +938,39 @@ class WorkspaceCheckoutTest(unittest.TestCase):
             ["git", "clone", "--depth", "1", "git@github.com:acme/demo.git", "."],
         )
 
+    # 函数说明：测试新建工作区 clone 时默认 URL 来自当前 Project item 的 repository。
+    def test_prepare_new_workspace_clones_current_item_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/api"],
+                    },
+                    "workspace": {"root": tmp},
+                }
+            )
+            calls = []
+
+            # 函数说明：截获新建 checkout，避免单元测试访问真实 GitHub。
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                WorkspaceManager(config.workspace).prepare(
+                    _item("I_8", "acme/api#8", blocked_by_open_count=0)
+                )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                calls[0][0],
+                ["git", "clone", "--depth", "1", "git@github.com:acme/api.git", "."],
+            )
+
     # 函数说明：测试自定义 clone_url、branch、path 会进入 clone 命令并先于 hook 执行。
     def test_prepare_runs_checkout_before_after_create_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1029,6 +1064,79 @@ class WorkspaceCheckoutTest(unittest.TestCase):
             self.assertEqual(config.workspace.checkout.mode, "hook")
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], "git clone git@github.com:acme/demo.git .")
+
+    # 函数说明：测试已存在工作区 origin 匹配当前仓库时允许复用，且不会再次 clone。
+    def test_existing_matching_remote_allows_workspace_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                    },
+                    "workspace": {"root": tmp},
+                }
+            )
+            workspace = Path(tmp) / "acme-demo-1"
+            workspace.mkdir(parents=True)
+            calls = []
+
+            # 函数说明：模拟 git remote get-url origin 返回匹配当前 item.repository 的远端。
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="git@github.com:acme/demo.git\n",
+                    stderr="",
+                )
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                result = WorkspaceManager(config.workspace).prepare(
+                    _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+                )
+
+            self.assertEqual(result, str(workspace.resolve()))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0][:4], ["git", "-C", str(workspace.resolve()), "remote"])
+
+    # 函数说明：测试已存在工作区若仍指向旧模板占位仓库，会明确报错而不删除目录。
+    def test_existing_placeholder_remote_rejects_workspace_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_config(
+                {
+                    "tracker": {
+                        "kind": "github_projects_v2",
+                        "owner_type": "org",
+                        "owner": "acme",
+                        "project_number": 1,
+                        "repositories": ["acme/demo"],
+                    },
+                    "workspace": {"root": tmp},
+                }
+            )
+            workspace = Path(tmp) / "acme-demo-1"
+            workspace.mkdir(parents=True)
+
+            # 函数说明：模拟旧 settings 占位 hook 曾经克隆出的错误 origin。
+            def fake_run(command, **kwargs):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="git@github.com:your-org/your-repo.git\n",
+                    stderr="",
+                )
+
+            with patch("symphony_github.core.workspace.subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(WorkspaceError, "仓库不匹配"):
+                    WorkspaceManager(config.workspace).prepare(
+                        _item("I_1", "acme/demo#1", blocked_by_open_count=0)
+                    )
+
+            self.assertTrue(workspace.exists())
 
     # 函数说明：测试 checkout path 不能逃出单个 work item 工作区。
     def test_checkout_path_cannot_escape_workspace(self) -> None:
@@ -1847,6 +1955,39 @@ Prompt body
 
 class DiagnosticsLoggingTest(unittest.TestCase):
     """验证持久诊断日志、脱敏和诊断包导出。"""
+
+    # 函数说明：测试 provider key 命名的字段会按字段名脱敏，避免泄露 Codex/OpenAI key。
+    def test_provider_key_names_are_redacted(self) -> None:
+        redacted = redact_data(
+            {
+                "codex_rin977_key": "codex-secret-value",
+                "openai_api_key": "openai-secret-value",
+                "api_key": "generic-secret-value",
+                "nested": {"custom_key": "nested-secret-value"},
+                "path": "/tmp/plain-path",
+                "workspace_path": "/tmp/workspace-path",
+            }
+        )
+        serialized = str(redacted)
+
+        self.assertNotIn("codex-secret-value", serialized)
+        self.assertNotIn("openai-secret-value", serialized)
+        self.assertNotIn("generic-secret-value", serialized)
+        self.assertNotIn("nested-secret-value", serialized)
+        self.assertIn("/tmp/plain-path", serialized)
+        self.assertIn("/tmp/workspace-path", serialized)
+        self.assertIn("***", serialized)
+
+    # 函数说明：测试普通文本中的 provider key 赋值会脱敏，但 path 字段不会被误伤。
+    def test_provider_key_text_is_redacted_without_redacting_path(self) -> None:
+        redacted = redact_text(
+            "path=/tmp/demo openai_api_key=sk-secret api_key='generic-secret' custom_key=hidden"
+        )
+
+        self.assertIn("path=/tmp/demo", redacted)
+        self.assertNotIn("sk-secret", redacted)
+        self.assertNotIn("generic-secret", redacted)
+        self.assertNotIn("hidden", redacted)
 
     # 函数说明：测试事件流会写入 JSONL，且 token 不会出现在查询结果或诊断包中。
     def test_jsonl_logs_are_redacted_and_exportable(self) -> None:

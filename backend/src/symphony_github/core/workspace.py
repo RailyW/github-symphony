@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 from .config import WorkspaceCheckoutConfig, WorkspaceCheckoutRepositoryConfig, WorkspaceConfig
 from .diagnostics import redact_text
@@ -46,7 +47,9 @@ class WorkspaceManager:
 
         # 逻辑说明：checkout 与 hook 都只在首次创建时执行，避免重试时覆盖 agent
         # 已完成的代码、分支和临时文件。
-        if not existed:
+        if existed and self.config.checkout.mode == "clone":
+            self._validate_existing_checkout(workspace, item)
+        elif not existed:
             try:
                 if self.config.checkout.mode == "clone":
                     self._run_checkout(workspace, item)
@@ -124,6 +127,37 @@ class WorkspaceManager:
                 f"exit={result.returncode}, stderr={redact_text(result.stderr.strip())}"
             )
 
+    # 函数说明：复用已有 clone 工作区前校验 origin，避免 agent 跑在旧的错误仓库里。
+    def _validate_existing_checkout(self, workspace: Path, item: WorkItem) -> None:
+        plan = build_checkout_plan(self.config.checkout, workspace, item)
+        if plan is None:
+            return
+
+        # 逻辑说明：已存在工作区不再自动 clone 或删除；只读取 git origin 并在不匹配时
+        # 明确失败，让用户可以手动检查、删除或迁移旧目录。
+        result = subprocess.run(
+            ["git", "-C", str(plan.destination), "remote", "get-url", "origin"],
+            cwd=str(workspace),
+            shell=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise WorkspaceError(
+                "工作区已存在但无法读取 git origin remote："
+                f"workspace={workspace}, stderr={redact_text(result.stderr.strip())}"
+            )
+
+        remote_url = result.stdout.strip()
+        if not _remote_matches_repository(remote_url, item.repository):
+            raise WorkspaceError(
+                "工作区已存在且仓库不匹配："
+                f"workspace={workspace}, expected={item.repository}, "
+                f"origin={redact_text(remote_url)}"
+            )
+
 
 # 函数说明：把 GitHub identifier 转换为安全目录名。
 def sanitize_identifier(identifier: str) -> str:
@@ -197,6 +231,39 @@ def _clone_url_for_repository(repository: str, protocol: str) -> str:
     if protocol == "https":
         return f"https://github.com/{owner}/{repo}.git"
     return f"git@github.com:{owner}/{repo}.git"
+
+
+# 函数说明：判断 git origin remote 是否指向当前 GitHub owner/repo。
+def _remote_matches_repository(remote_url: str, repository: str) -> bool:
+    normalized_remote = _repository_from_remote_url(remote_url)
+    if not normalized_remote:
+        return False
+    owner, repo = _split_repository(repository)
+    return normalized_remote.lower() == f"{owner}/{repo}".lower()
+
+
+# 函数说明：从 HTTPS、ssh:// 或 scp-like git remote URL 中提取最后两段 owner/repo。
+def _repository_from_remote_url(remote_url: str) -> Optional[str]:
+    text = remote_url.strip()
+    if not text:
+        return None
+
+    # 逻辑说明：URL 形式使用标准解析；git@host:owner/repo.git 这类 scp-like
+    # 形式没有 scheme，需要取冒号后的路径部分。
+    if "://" in text:
+        path_text = urlparse(text).path
+    elif re.match(r"^[^/\s]+:.+", text):
+        path_text = text.split(":", 1)[1]
+    else:
+        path_text = text
+
+    cleaned = path_text.strip().strip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = [part for part in cleaned.split("/") if part]
+    if len(parts) < 2:
+        return None
+    return f"{parts[-2]}/{parts[-1]}"
 
 
 # 函数说明：拆分 GitHub owner/repo 仓库名。

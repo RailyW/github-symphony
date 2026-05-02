@@ -43,6 +43,7 @@
 - `tracker.repositories` is the dispatch allowlist and GitHub REST allowlist. Every entry must be a single `owner/repo` pair.
 - A GitHub Project item must be skipped before dispatch if its `content.repository.nameWithOwner` is not in `tracker.repositories`.
 - `workspace.checkout.mode=clone` runs built-in `git clone` only when the per-item workspace is newly created.
+- `workspace.checkout.mode=clone` must verify `git remote get-url origin` before reusing an existing per-item workspace; the remote repository must match the current item `repository`.
 - `workspace.checkout.mode=hook` never runs built-in checkout; `workspace.hooks.after_create` remains responsible for preparing code.
 - `workspace.checkout.mode=none` creates an empty workspace and still allows `after_create` if configured.
 - Missing `workspace.checkout` plus a non-empty legacy `after_create` hook must normalize to `mode=hook` to prevent duplicate clones.
@@ -69,6 +70,8 @@
 - `workspace.checkout.repositories` key not in `tracker.repositories` -> config error.
 - `workspace.checkout.repositories.*.path` empty -> config error.
 - checkout path resolves outside the item workspace -> `WorkspaceError`.
+- existing clone-mode workspace has no readable `origin` remote -> `WorkspaceError`; do not delete the existing directory.
+- existing clone-mode workspace `origin` remote normalizes to a repository different from the current item `repository` -> `WorkspaceError`; do not delete the existing directory.
 - `git clone` exits non-zero -> `WorkspaceError` with stderr redacted.
 - checkout fails during first workspace creation -> remove the partially prepared workspace before rethrowing.
 - hook fails after checkout -> `WorkspaceError` with stderr redacted; for clone mode, remove the partially prepared workspace before rethrowing.
@@ -77,11 +80,13 @@
 ### 5. Good/Base/Bad Cases
 
 - Good: Project item `owner/repo#123` is in `tracker.repositories`; `mode=clone` clones `git@github.com:owner/repo.git` into `.` and then runs `after_create`.
+- Good: Existing workspace for `owner/repo#123` has `origin=git@github.com:owner/repo.git`; scheduler reuses it without running clone or hook again.
 - Good: `workspace.checkout.repositories.owner/repo.clone_url` overrides the generated URL for Enterprise or unusual remotes.
 - Base: legacy workflow has only `after_create: git clone ... .`; normalized checkout mode is `hook`, so only the hook runs.
 - Base: `depth: null` creates a full clone command without `--depth`.
 - Bad: Project item from `other/repo` appears in the same Project; tracker logs a debug skip and never dispatches it.
 - Bad: custom checkout path `../repo` resolves outside the item workspace and must be rejected.
+- Bad: Existing workspace has `origin=git@github.com:your-org/your-repo.git` while the item repository is `owner/repo`; reuse must fail instead of running Codex in the wrong checkout.
 - Bad: failed clone leaves no prepared workspace behind, so the next scheduler retry can attempt checkout again.
 
 ### 6. Tests Required
@@ -97,6 +102,8 @@
   - custom `clone_url`, `branch`, and `path`
   - checkout runs before hook
   - non-clone modes do not run built-in checkout
+  - existing clone-mode workspace with matching origin is reused
+  - existing clone-mode workspace with placeholder or mismatched origin fails without deletion
   - checkout path containment
   - clone failure redacts secrets and cleans the new workspace
 - Tracker behavior:

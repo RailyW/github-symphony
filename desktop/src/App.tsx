@@ -1019,7 +1019,7 @@ function WorkspaceSettings({
     <>
       <SectionIntro
         title="Workspace"
-        text="每个派发任务会拥有独立工作区。内置 checkout 会按当前任务仓库 clone，after_create hook 只负责后续扩展。"
+        text="每个派发任务会拥有独立工作区。内置 checkout 会按当前任务仓库 clone，并在复用已有目录前校验 origin 仓库，after_create hook 只负责后续扩展。"
       />
       <div className="formGrid">
         <TextField

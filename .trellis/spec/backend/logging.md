@@ -38,6 +38,18 @@ const logger = baseLogger.scope('project:create');
 logger.info('Project created', { projectId: '123' });
 ```
 
+### Redact Secret-Like Key Names
+
+Log payload redaction must treat provider-key field names as secret values, including `api_key`, `*_api_key`, and `*_key` such as `codex_rin977_key` or `openai_api_key`. Logs may record the environment variable name in a neutral metadata field like `variable_name`, but must not record the variable value.
+
+```typescript
+// Correct: records the variable name without using a secret-like payload key.
+logger.info('Codex env key imported', { variable_name: 'codex_rin977_key' });
+
+// Wrong: would require redaction because the key name itself denotes a secret value.
+logger.info('Codex env key imported', { codex_rin977_key: process.env.CODEX_RIN977_KEY });
+```
+
 ### Log Levels
 
 | Level   | Use Case            |
